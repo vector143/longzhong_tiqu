@@ -1,5 +1,0 @@
-{"timestamp": "2025-10-28 20:47:03", "type": "SESSION_START", "keyword": "原油", "time_range": "全部数据", "message": "开始增量爬取: 原油 (全部数据)"}
-{"timestamp": "2025-10-28 20:47:03", "type": "ERROR", "message": "Cookies加载失败"}
-{"timestamp": "2025-10-28 20:47:54", "type": "SESSION_START", "keyword": "原油", "time_range": "全部数据", "message": "开始增量爬取: 原油 (全部数据)"}
-{"timestamp": "2025-10-28 20:48:06", "type": "ARTICLES_STATS", "total_articles": 10, "publish_time_range": "2025-10-28 08:41:23 至 2025-10-28 16:02:00", "html_files": 0, "word_files": 0, "message": "爬取完成: 共10篇文章, 发布时间范围: 2025-10-28 08:41:23 至 2025-10-28 16:02:00"}
-{"timestamp": "2025-10-28 20:48:06", "type": "SESSION_END", "total_articles": 10, "elapsed_seconds": 11.85, "message": "会话结束: 处理10篇文章, 耗时11.85秒"}
