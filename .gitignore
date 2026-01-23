@@ -31,6 +31,10 @@ ENV/
 
 # 日志文件
 *.log
+monitor.log
+
+# 监控 PID 文件
+.monitor.pid
 
 # 系统文件
 .DS_Store
@@ -50,3 +54,11 @@ coverage.xml
 
 # Jupyter Notebook
 .ipynb_checkpoints
+
+# 爬取与输出产物
+*_articles_summary.csv
+*_articles_with_content.json
+*_filename_mapping.csv
+articles/
+output/
+storage/
