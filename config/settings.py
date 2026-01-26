@@ -51,10 +51,10 @@ class CrawlerConfig:
     base_dir: str = "articles"
     project_code: str = "OIL"
     log_file: str = "incremental_update.log"
-    default_pages: int = 10
-    default_delay: float = 0.3
-    max_crawl_workers: int = 5
-    max_upload_workers: int = 3
+    default_pages: int = 50
+    default_delay: float = 1.5
+    max_crawl_workers: int = 2
+    max_upload_workers: int = 1
 
 
 @dataclass

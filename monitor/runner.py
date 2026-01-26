@@ -20,6 +20,7 @@ from clients import AsyncMemoryQiniuUploader, OilChemCookiesManager
 from config import get_settings
 from convert import AsyncFormatConverter
 from core import UniversalNamingSystem
+from crawl.pipeline import extract_from_keyword_async_multithread
 from monitor.keyboard import KeyboardListener
 from monitor.scheduler import CrawlScheduler, MultiCrawlScheduler
 from monitor.state import MonitorState
@@ -35,6 +36,17 @@ def _positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError("必须是整数") from exc
     if parsed <= 0:
         raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    """argparse 非负整数类型"""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是整数") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须是非负整数")
     return parsed
 
 
@@ -63,6 +75,24 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="轮询间隔（分钟）",
     )
     parser.add_argument(
+        "--days",
+        type=_non_negative_int,
+        default=30,
+        help="历史回溯天数（用于历史爬取）",
+    )
+    parser.add_argument(
+        "--hours",
+        type=_non_negative_int,
+        default=None,
+        help="历史回溯小时数（用于历史爬取）",
+    )
+    parser.add_argument(
+        "--pages",
+        type=_positive_int,
+        default=3,
+        help="历史爬取页数",
+    )
+    parser.add_argument(
         "--no-interactive",
         action="store_true",
         help="禁用交互模式（无 Rich UI）",
@@ -71,6 +101,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--force",
         action="store_true",
         help="强制启动（忽略过期 PID 文件）",
+    )
+    parser.add_argument(
+        "--no-monitor",
+        action="store_true",
+        help="仅历史爬取，不启动监控",
     )
     return parser.parse_args(argv)
 
@@ -161,6 +196,74 @@ def _normalize_keywords(*values: Optional[str]) -> List[str]:
             if item and item not in keywords:
                 keywords.append(item)
     return keywords
+
+
+def _run_history_crawl(
+    keywords: List[str],
+    days_back: Optional[int],
+    hours_back: Optional[int],
+    pages_to_crawl: Optional[int],
+    settings,
+) -> None:
+    """执行历史爬取"""
+    # 0 值视为未指定
+    if days_back == 0:
+        days_back = None
+    if hours_back == 0:
+        hours_back = None
+
+    # 检查是否有历史爬取请求
+    history_requested = any([days_back, hours_back, pages_to_crawl])
+    if not history_requested or not keywords:
+        return
+
+    # --days 与 --hours 互斥
+    if days_back and hours_back:
+        print("⚠️ --days 与 --hours 不能同时使用，优先使用 --days")
+        hours_back = None
+
+    # 七牛配置检查
+    upload_to_qiniu = settings.output.upload_to_qiniu
+    qiniu_config = None
+    if upload_to_qiniu:
+        qiniu_config = settings.get_qiniu_config()
+        if not qiniu_config:
+            print("⚠️ 七牛云上传已启用但配置缺失，历史爬取将跳过上传")
+            upload_to_qiniu = False
+
+    print("\n" + "=" * 50)
+    print("⏳ 开始历史爬取...")
+    print("=" * 50)
+    if days_back:
+        print(f"  📅 时间范围: 最近 {days_back} 天")
+    elif hours_back:
+        print(f"  📅 时间范围: 最近 {hours_back} 小时")
+    else:
+        print("  📅 时间范围: 不限（按页数爬取）")
+    if pages_to_crawl:
+        print(f"  📄 爬取页数: {pages_to_crawl}")
+    print(f"  🔑 关键词: {', '.join(keywords)}")
+    print("=" * 50 + "\n")
+
+    for keyword in keywords:
+        print(f"\n🔎 正在爬取关键词: {keyword}")
+        print("-" * 40)
+        extract_from_keyword_async_multithread(
+            keyword=keyword,
+            pages_to_crawl=pages_to_crawl,
+            days_back=days_back,
+            hours_back=hours_back,
+            output_formats=settings.output.default_formats.copy(),
+            qiniu_config=qiniu_config,
+            save_locally=settings.output.save_locally,
+            upload_to_qiniu=upload_to_qiniu,
+            max_crawl_workers=settings.crawler.max_crawl_workers,
+            max_upload_workers=settings.crawler.max_upload_workers,
+        )
+
+    print("\n" + "=" * 50)
+    print("✅ 历史爬取完成")
+    print("=" * 50 + "\n")
 
 
 def run_monitor(argv: Optional[List[str]] = None) -> int:
@@ -254,6 +357,20 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
         if not ok:
             print("❌ 启动前预检未通过，退出")
             return 1
+
+        # 执行历史爬取（如果指定了 --days/--hours/--pages）
+        _run_history_crawl(
+            keywords=keywords,
+            days_back=args.days,
+            hours_back=args.hours,
+            pages_to_crawl=args.pages,
+            settings=settings,
+        )
+
+        # 如果指定了 --no-monitor，跳过监控直接退出
+        if args.no_monitor:
+            print("⏹️ 已按 --no-monitor 跳过监控")
+            return 0
 
         # 初始化七牛上传器
         if settings.output.upload_to_qiniu:
