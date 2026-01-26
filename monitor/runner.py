@@ -107,6 +107,13 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="仅历史爬取，不启动监控",
     )
+    parser.add_argument(
+        "--no-history",
+        "--monitor-only",
+        action="store_true",
+        dest="no_history",
+        help="仅启动监控，跳过历史爬取",
+    )
     return parser.parse_args(argv)
 
 
@@ -359,13 +366,16 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
             return 1
 
         # 执行历史爬取（如果指定了 --days/--hours/--pages）
-        _run_history_crawl(
-            keywords=keywords,
-            days_back=args.days,
-            hours_back=args.hours,
-            pages_to_crawl=args.pages,
-            settings=settings,
-        )
+        if args.no_history:
+            print("⏭️ 已按 --no-history/--monitor-only 跳过历史爬取")
+        else:
+            _run_history_crawl(
+                keywords=keywords,
+                days_back=args.days,
+                hours_back=args.hours,
+                pages_to_crawl=args.pages,
+                settings=settings,
+            )
 
         # 如果指定了 --no-monitor，跳过监控直接退出
         if args.no_monitor:
