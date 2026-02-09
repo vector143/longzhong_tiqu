@@ -7,7 +7,7 @@
 - crawl_article_worker_async: 单篇文章处理Worker
 """
 
-from .requests import get_article_list, extract_article_content
+from .oilchem_requests import get_article_list, extract_article_content
 from .worker import crawl_article_worker_async
 
 __all__ = [

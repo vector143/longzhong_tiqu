@@ -226,7 +226,7 @@ crawl/requests.py
 ```bash
 # === 必跑检查（离线）===
 # 1. 语法检查
-python -m py_compile crawl/requests.py crawl/__init__.py
+python -m py_compile crawl/oilchem_requests.py crawl/__init__.py
 
 # 2. 行数检查
 wc -l crawl/*.py | awk '$1 > 300 {print "❌ 超过300行:", $2; exit 1}'
@@ -808,9 +808,10 @@ __all__ = ['save_results']
 ```
 
 #### crawl/pipeline.py 依赖（使用绝对导入）
+
 ```python
 """爬取管道 - 主流程控制"""
-from crawl.requests import get_article_list
+from crawl.oilchem_requests import get_article_list
 from crawl.worker import crawl_article_worker_async
 from clients import OilChemCookiesManager, AsyncMemoryQiniuUploader
 from convert import AsyncFormatConverter

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from config.settings import get_settings
 from convert import AsyncFormatConverter, html_to_text_and_tables
 from convert.cleaned_converter import CleanedConverter
-from crawl.requests import extract_article_content
+from crawl.oilchem_requests import extract_article_content
 
 # 模块级别缓存 CleanedConverter 实例
 _cleaned_converter: Optional[CleanedConverter] = None
