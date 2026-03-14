@@ -170,3 +170,34 @@ def test_run_monitor_shares_request_gate_across_multiple_keywords(monkeypatch):
     assert len(rate_limiters) == 2
     assert rate_limiters[0] is not None
     assert rate_limiters[0] is rate_limiters[1]
+
+
+def test_run_monitor_warns_about_cold_start_gap_when_no_history(monkeypatch, capsys):
+    exit_code, _created_keywords, _request_gates, _rate_limiters = (
+        _run_with_patched_runner(
+            monkeypatch,
+            ["--keywords", "甲醇,PTA", "--no-history", "--no-interactive"],
+            default_keyword="原油",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "冷启动" in captured.out
+    assert "漏数" in captured.out
+
+
+def test_run_monitor_warns_about_overlapping_keywords(monkeypatch, capsys):
+    exit_code, _created_keywords, _request_gates, _rate_limiters = (
+        _run_with_patched_runner(
+            monkeypatch,
+            ["--keywords", "橡胶,天然橡胶", "--no-history", "--no-interactive"],
+            default_keyword="原油",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "关键词存在重叠" in captured.out
+    assert "橡胶" in captured.out
+    assert "天然橡胶" in captured.out

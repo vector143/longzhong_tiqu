@@ -210,6 +210,18 @@ def _normalize_keywords(*values: Optional[str]) -> List[str]:
     return keywords
 
 
+def _find_keyword_overlaps(keywords: List[str]) -> List[Tuple[str, str]]:
+    """找出存在包含关系的关键词对，减少误配时的重复抓取。"""
+    overlaps: List[Tuple[str, str]] = []
+    for index, left in enumerate(keywords):
+        for right in keywords[index + 1 :]:
+            if left == right:
+                continue
+            if left in right or right in left:
+                overlaps.append((left, right))
+    return overlaps
+
+
 def _run_history_crawl(
     keywords: List[str],
     days_back: Optional[int],
@@ -305,6 +317,14 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
         print("⚠️ 检测到非 TTY 环境，已自动禁用交互模式")
 
     _print_banner(keywords, interval_minutes, interactive)
+
+    if args.no_history and not args.no_monitor:
+        print("⚠️ 当前以 --no-history 启动，首轮轮询前存在冷启动漏数窗口。")
+
+    overlap_pairs = _find_keyword_overlaps(keywords)
+    if overlap_pairs:
+        overlap_text = "，".join(f"{left}/{right}" for left, right in overlap_pairs)
+        print(f"⚠️ 关键词存在重叠，可能增加重复命中与无效抓取: {overlap_text}")
 
     # 初始化状态管理器
     state = MonitorState(

@@ -117,3 +117,19 @@ def test_main_stops_created_monitors_on_keyboard_interrupt(monkeypatch) -> None:
     assert exc_info.value.code == 0
     assert [monitor.channel for monitor in created_monitors] == ["oil-channel"]
     assert all(monitor.stop_called for monitor in created_monitors)
+
+
+def test_main_warns_when_polling_all_channels_too_aggressively(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["multi_commodity_monitor.py", "--fetch", "--interval", "30"]
+    )
+    monkeypatch.setattr(module, "fetch_mode", lambda *args, **kwargs: None)
+
+    module.main()
+
+    captured = capsys.readouterr()
+    assert "5 个频道" in captured.out
+    assert "30 秒" in captured.out
+    assert "建议" in captured.out

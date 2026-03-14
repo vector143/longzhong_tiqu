@@ -36,6 +36,42 @@ from crawl.investing_crawler import InvestingCommodityNewsCrawler
 from crawl.investing_formatter import InvestingFormatter
 
 
+def _positive_int(value: str) -> int:
+    """argparse 正整数类型"""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是整数") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    """argparse 非负浮点数类型"""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是数字") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须是非负数")
+    return parsed
+
+
+def _print_runtime_advice(args: argparse.Namespace) -> None:
+    """打印激进配置的运行建议"""
+    if args.proxy and len(args.channels) > 1 and args.interval < 60:
+        print(
+            "⚠️ 当前配置会通过单一代理高频轮询多个频道，"
+            "真实轮询周期可能明显大于设定值。"
+        )
+        print("   建议提高 --interval，或缩窄 --channels。")
+
+    if args.workers > 3 and len(args.channels) > 1:
+        print("⚠️ 当前详情并发较高，代理或站点限流时更容易出现超时。")
+        print("   建议将 --workers 控制在 2 到 3。")
+
+
 class RateLimiter:
     """智能限速器 - 替代固定sleep，支持并发"""
 
@@ -485,7 +521,11 @@ class InvestingMonitor:
         return stats
 
     def monitor_loop(
-        self, channels: List[str], interval: int = 300, delay: float = 3.0
+        self,
+        channels: List[str],
+        interval: int = 300,
+        delay: float = 3.0,
+        max_pages: int = 3,
     ):
         """
         持续监控模式
@@ -516,7 +556,11 @@ class InvestingMonitor:
                 )
                 print(f"{'='*80}\n")
 
-                stats = self.crawl_incremental(channels, delay=delay)
+                stats = self.crawl_incremental(
+                    channels,
+                    delay=delay,
+                    max_pages=max_pages,
+                )
 
                 total_new = sum(stats.values())
                 print(f"\n{'='*80}")
@@ -568,7 +612,7 @@ def main():
 
     parser.add_argument(
         "--history",
-        type=int,
+        type=_positive_int,
         default=None,
         help="历史爬取模式：每个频道爬取的文章数量（例如: 100）",
     )
@@ -583,7 +627,7 @@ def main():
     parser.add_argument(
         "--interval",
         "-i",
-        type=int,
+        type=_positive_int,
         default=300,
         help="监控模式的检查间隔（秒）(默认: 300秒=5分钟)",
     )
@@ -600,7 +644,7 @@ def main():
     parser.add_argument(
         "--delay",
         "-d",
-        type=float,
+        type=_non_negative_float,
         default=1.0,
         help="请求最小间隔（秒）(默认: 1.0，用于限速器)",
     )
@@ -608,9 +652,16 @@ def main():
     parser.add_argument(
         "--workers",
         "-w",
-        type=int,
+        type=_positive_int,
         default=5,
         help="最大并发数 (默认: 5)",
+    )
+
+    parser.add_argument(
+        "--max-pages",
+        type=_positive_int,
+        default=3,
+        help="单轮增量模式最多检查页数 (默认: 3)",
     )
 
     parser.add_argument(
@@ -628,6 +679,7 @@ def main():
     )
 
     args = parser.parse_args()
+    _print_runtime_advice(args)
 
     # 创建监控器（使用新的并发参数）
     monitor = InvestingMonitor(
@@ -652,7 +704,7 @@ def main():
         print(f"📊 总计: {total} 篇文章")
         for channel, count in stats.items():
             print(f"   - {channel}: {count} 篇")
-        print(f"💾 保存位置: {args.output}")
+        print(f"💾 保存位置: {monitor.output_dir}")
         print(f"{'='*80}")
 
     elif args.monitor:
@@ -661,6 +713,7 @@ def main():
             channels=args.channels,
             interval=args.interval,
             delay=args.delay,
+            max_pages=args.max_pages,
         )
 
     else:
@@ -668,6 +721,7 @@ def main():
         stats = monitor.crawl_incremental(
             channels=args.channels,
             delay=args.delay,
+            max_pages=args.max_pages,
         )
 
         total = sum(stats.values())
@@ -676,7 +730,7 @@ def main():
         print(f"📊 新增: {total} 篇文章")
         for channel, count in stats.items():
             print(f"   - {channel}: {count} 篇")
-        print(f"💾 保存位置: {args.output}")
+        print(f"💾 保存位置: {monitor.output_dir}")
         print(f"📊 数据库总计: {len(monitor.seen_digests)} 篇文章")
         print(f"{'='*80}")
 

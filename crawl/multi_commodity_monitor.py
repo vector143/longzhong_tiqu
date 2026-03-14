@@ -52,6 +52,18 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _print_runtime_advice(
+    interval: int, important_only: bool, channels: List[str]
+) -> None:
+    """打印激进轮询配置的运行建议"""
+    if len(channels) >= 4 and interval <= 30 and not important_only:
+        print(
+            f"⚠️ 当前配置会以 {interval} 秒频率轮询 {len(channels)} 个频道，"
+            "且不过滤重要快讯。"
+        )
+        print("   建议加 --important，缩窄 --channels，或把 --interval 提到 45-60 秒。")
+
+
 def save_to_json(items, output_dir: Optional[str] = None):
     """保存快讯到JSON文件（隆众格式）"""
     if output_dir is None:
@@ -221,6 +233,7 @@ def main():
     print("按 Ctrl+C 停止监控")
     print("=" * 60)
     print()
+    _print_runtime_advice(args.interval, args.important, args.channels)
 
     if args.fetch:
         fetch_mode(

@@ -10,3 +10,5 @@
 - `monitor` 包如果要暴露 CLI 入口函数，优先用懒加载包装器；`__init__.py` 直接导入入口子模块会污染 `python -m package.module` 的加载顺序。
 - `tests/` 下直接 `from crawl ...` 的测试需要统一补项目根路径或通过 `conftest.py` 提供路径注入，否则单独跑 `pytest -q` 时会出现 `ModuleNotFoundError: crawl`。
 - [crawl/calendar_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/calendar_monitor.py#L27) 和 [monitor/adapters.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapters.py#L18) 这类新入口默认输出目录不能写死到开发机绝对路径；必须用项目相对路径，并把 `output_dir` 从 CLI/回调链路一路透传。
+- [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py#L582) 这类常驻入口的 CLI 数值参数必须在 `argparse` 层就做正整数/非负校验；否则 `--interval 0`、`--workers -1` 之类配置会直接把错误拖到运行期。
+- [monitor/runner.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/runner.py#L319) 的 `--no-history` 不是纯性能优化开关，它会制造首轮轮询前的冷启动漏数窗口；多关键词命令还要额外提示关键词包含关系带来的重复命中风险。
