@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
 from config import get_settings
-from crawl.requests import get_article_list
+from crawl.api_requests import get_article_list
 from crawl.worker import crawl_article_worker_async
 from clients import OilChemCookiesManager, AsyncMemoryQiniuUploader
 from convert import AsyncFormatConverter
