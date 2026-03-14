@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import datetime
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, TypeVar, Union
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -24,6 +24,8 @@ from core import UniversalNamingSystem
 from crawl.pipeline import CrawlResult, incremental_crawl
 from monitor.state import MonitorState
 from monitor.utils import ThreadSafeSet, TokenBucketRateLimiter, retry_with_backoff
+
+T = TypeVar("T")
 
 
 class CrawlScheduler:
@@ -55,6 +57,8 @@ class CrawlScheduler:
         retry_base_delay: Optional[float] = None,
         on_poll_complete: Optional[Callable[[CrawlResult], None]] = None,
         manage_state_pause: bool = True,
+        request_gate: Optional[threading.Lock] = None,
+        rate_limiter: Optional[TokenBucketRateLimiter] = None,
     ) -> None:
         """
         初始化调度器
@@ -85,6 +89,7 @@ class CrawlScheduler:
         self._paused = False
         self._running = False
         self._manage_state_pause = manage_state_pause
+        self._request_gate = request_gate
 
         # 从配置加载默认值
         self.interval_minutes = interval_minutes or monitor_cfg.poll_interval_minutes
@@ -112,7 +117,7 @@ class CrawlScheduler:
         self._delay = settings.crawler.default_delay
 
         # M2: 初始化请求限流器
-        self._rate_limiter = TokenBucketRateLimiter(
+        self._rate_limiter = rate_limiter or TokenBucketRateLimiter(
             requests_per_minute=monitor_cfg.requests_per_minute,
             min_interval=monitor_cfg.min_request_interval,
         )
@@ -316,7 +321,7 @@ class CrawlScheduler:
 
             # 验证 Cookie 会话
             if self.validate_session_before_poll and self.cookies_manager:
-                if not self._validate_session():
+                if not self._run_with_request_gate(self._validate_session):
                     had_error = True
                     return
 
@@ -369,6 +374,14 @@ class CrawlScheduler:
             print(f"❌ 会话验证异常: {e}")
             return False
 
+    def _run_with_request_gate(self, func: Callable[[], T]) -> T:
+        """在共享请求闸门下执行会话相关操作。"""
+        if self._request_gate is None:
+            return func()
+
+        with self._request_gate:
+            return func()
+
     def _run_incremental_with_retry(self) -> CrawlResult:
         """执行增量爬取（带重试）"""
         # M1: 校验 converter 是否已配置
@@ -381,15 +394,17 @@ class CrawlScheduler:
         def _run_once() -> CrawlResult:
             # M2: 在执行爬取前获取令牌，确保请求速率受控
             self._rate_limiter.acquire(blocking=True)
-            return incremental_crawl(
-                keyword=self.keyword,
-                existing_ids=self.existing_ids,
-                cookies_manager=self.cookies_manager,
-                converter=self.converter,
-                output_formats=self.output_formats,
-                max_pages=self.max_pages,
-                early_stop_threshold=self.early_stop_threshold,
-                delay=self._delay,
+            return self._run_with_request_gate(
+                lambda: incremental_crawl(
+                    keyword=self.keyword,
+                    existing_ids=self.existing_ids,
+                    cookies_manager=self.cookies_manager,
+                    converter=self.converter,
+                    output_formats=self.output_formats,
+                    max_pages=self.max_pages,
+                    early_stop_threshold=self.early_stop_threshold,
+                    delay=self._delay,
+                )
             )
 
         # 无重试时直接执行

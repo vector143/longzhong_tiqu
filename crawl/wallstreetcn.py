@@ -200,31 +200,51 @@ class WallStreetCNLiveCrawler:
         Returns:
             新快讯列表（已解析为统一格式）
         """
-        result = self.fetch_lives(
-            channel=channel,
-            limit=limit,
-            important_only=important_only,
-            min_score=min_score,
-        )
+        cursor: Optional[str] = None
+        parsed_items: List[Dict[str, Any]] = []
+        seen_ids = set()
+        max_pages = 5
 
-        if not result["success"]:
-            print(f"❌ 获取快讯失败: {result['error']}")
-            return []
+        for _ in range(max_pages):
+            result = self.fetch_lives(
+                channel=channel,
+                limit=limit,
+                cursor=cursor,
+                important_only=important_only,
+                min_score=min_score,
+            )
 
-        # 解析并过滤
-        parsed_items = []
-        for item in result["data"]:
-            try:
-                parsed = self.parse_live_item(item)
+            if not result["success"]:
+                print(f"❌ 获取快讯失败: {result['error']}")
+                break
 
-                # 如果指定了 last_id，只返回比它新的内容
-                if last_id and parsed["id"] <= last_id:
+            stop_pagination = False
+
+            for item in result["data"]:
+                try:
+                    parsed = self.parse_live_item(item)
+                    item_id = parsed.get("id")
+
+                    # 数据按时间倒序排列，命中旧ID后可直接停止翻页
+                    if last_id and item_id is not None and item_id <= last_id:
+                        stop_pagination = True
+                        break
+
+                    if item_id in seen_ids:
+                        continue
+
+                    seen_ids.add(item_id)
+                    parsed_items.append(parsed)
+                except Exception as e:
+                    print(f"⚠️ 解析快讯失败: {e}")
                     continue
 
-                parsed_items.append(parsed)
-            except Exception as e:
-                print(f"⚠️ 解析快讯失败: {e}")
-                continue
+            if last_id is None or stop_pagination:
+                break
+
+            cursor = result.get("next_cursor")
+            if not cursor or not result["data"]:
+                break
 
         return parsed_items
 
@@ -257,6 +277,43 @@ class WallStreetCNMonitor:
         self.min_score = min_score
         self.last_id: Optional[int] = None
         self.is_running = False
+        self.fetch_limit = 20
+        self.max_drain_rounds = 3
+
+    def _fetch_new_items_for_poll(self) -> List[Dict[str, Any]]:
+        """单轮轮询内尽量拉齐所有新增快讯，避免窗口截断漏数。"""
+        collected: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        for _ in range(self.max_drain_rounds):
+            batch = self.crawler.fetch_incremental(
+                last_id=self.last_id,
+                channel=self.channel,
+                limit=self.fetch_limit,
+                important_only=self.important_only,
+                min_score=self.min_score,
+            )
+            if not batch:
+                break
+
+            fresh_batch = []
+            for item in batch:
+                item_id = item.get("id")
+                dedupe_key = item_id if item_id is not None else item.get("url")
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                fresh_batch.append(item)
+
+            if not fresh_batch:
+                break
+
+            collected.extend(fresh_batch)
+
+            if len(batch) < self.fetch_limit:
+                break
+
+        return collected
 
     def start(self, callback=None):
         """
@@ -291,12 +348,7 @@ class WallStreetCNMonitor:
                 time.sleep(self.poll_interval)
 
                 # 获取增量数据
-                new_items = self.crawler.fetch_incremental(
-                    last_id=self.last_id,
-                    channel=self.channel,
-                    important_only=self.important_only,
-                    min_score=self.min_score,
-                )
+                new_items = self._fetch_new_items_for_poll()
 
                 if new_items:
                     print(f"📰 发现 {len(new_items)} 条新快讯")

@@ -25,7 +25,12 @@ from monitor.keyboard import KeyboardListener
 from monitor.scheduler import CrawlScheduler, MultiCrawlScheduler
 from monitor.state import MonitorState
 from monitor.ui import MonitorUI
-from monitor.utils import PidFileManager, ThreadSafeSet, check_disk_space
+from monitor.utils import (
+    PidFileManager,
+    ThreadSafeSet,
+    TokenBucketRateLimiter,
+    check_disk_space,
+)
 
 
 def _positive_int(value: str) -> int:
@@ -287,10 +292,10 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
     settings = get_settings()
     monitor_cfg = settings.monitor
 
-    # 确定运行参数
-    keywords = _normalize_keywords(
-        args.keywords, args.keyword, monitor_cfg.default_keyword
-    )
+    # 确定运行参数：显式 CLI 关键词优先，未指定时才回退配置默认值
+    keywords = _normalize_keywords(args.keywords, args.keyword)
+    if not keywords:
+        keywords = _normalize_keywords(monitor_cfg.default_keyword)
     interval_minutes = args.interval or monitor_cfg.poll_interval_minutes
     interactive = monitor_cfg.interactive and not args.no_interactive
 
@@ -414,6 +419,16 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
             upload_to_qiniu=settings.output.upload_to_qiniu,
         )
 
+        # 多关键词共用同一个请求闸门和限流器，避免共享会话并发乱序
+        shared_request_gate = None
+        shared_rate_limiter = None
+        if len(keywords) > 1:
+            shared_request_gate = threading.RLock()
+            shared_rate_limiter = TokenBucketRateLimiter(
+                requests_per_minute=getattr(monitor_cfg, "requests_per_minute", 30),
+                min_interval=getattr(monitor_cfg, "min_request_interval", 0.5),
+            )
+
         # 初始化调度器
         schedulers: List[CrawlScheduler] = []
         for keyword in keywords:
@@ -432,6 +447,8 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
                     max_retries=monitor_cfg.max_retries,
                     retry_base_delay=monitor_cfg.retry_base_delay,
                     manage_state_pause=len(keywords) == 1,
+                    request_gate=shared_request_gate,
+                    rate_limiter=shared_rate_limiter,
                 )
             )
 
