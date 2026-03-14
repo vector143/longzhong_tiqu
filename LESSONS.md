@@ -6,4 +6,6 @@
 - [crawl/wallstreetcn.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/wallstreetcn.py#L182) 的增量轮询不能只盯住单页固定窗口；高频快讯源必须在单轮内继续 drain，直到命中旧 `last_id` 或无下一页。
 - [monitor/runner.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/runner.py#L290) 里 CLI 显式传入的 `--keyword/--keywords` 应覆盖配置默认值，不能和 `default_keyword` 混合；否则监控范围会悄悄放大。
 - [crawl/multi_commodity_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/multi_commodity_monitor.py#L38) 不应硬编码绝对输出目录；监控脚本要优先使用项目相对路径或显式 CLI 参数。
+- [crawl/multi_commodity_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/multi_commodity_monitor.py#L94) 这类常驻监控线程不能只靠 daemon 退出；主线程收到 `KeyboardInterrupt` 后要显式 `stop()` 每个 monitor，再做有限等待。
+- `monitor` 包如果要暴露 CLI 入口函数，优先用懒加载包装器；`__init__.py` 直接导入入口子模块会污染 `python -m package.module` 的加载顺序。
 - `tests/` 下直接 `from crawl ...` 的测试需要统一补项目根路径或通过 `conftest.py` 提供路径注入，否则单独跑 `pytest -q` 时会出现 `ModuleNotFoundError: crawl`。

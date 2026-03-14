@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import List, Optional
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -34,9 +35,28 @@ COMMODITY_CHANNELS = [
     "goldc-channel",  # 黄金C
 ]
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "output" / "report" / "cleaned"
 
-def save_to_json(items, output_dir="articles/wallstreetcn"):
+
+def _positive_int(value: str) -> int:
+    """argparse 正整数类型"""
+    import argparse
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是整数") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def save_to_json(items, output_dir: Optional[str] = None):
     """保存快讯到JSON文件（隆众格式）"""
+    if output_dir is None:
+        output_dir = str(DEFAULT_OUTPUT_DIR)
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +85,7 @@ def save_to_json(items, output_dir="articles/wallstreetcn"):
             print(f"   ❌ 保存失败: {e}")
 
 
-def on_new_items(channel_name, items):
+def on_new_items(channel_name, items, output_dir: Optional[str] = None):
     """处理新快讯的回调函数"""
     if not items:
         return
@@ -84,11 +104,18 @@ def on_new_items(channel_name, items):
 
     # 保存到文件
     print("\n💾 保存快讯...")
-    save_to_json(items)
+    save_to_json(items, output_dir=output_dir)
     print(f"{'='*60}\n")
 
 
-def monitor_channel(channel_name, interval=30, important_only=False):
+def monitor_channel(
+    channel_name,
+    interval=30,
+    important_only=False,
+    output_dir: Optional[str] = None,
+    monitors: Optional[List[WallStreetCNMonitor]] = None,
+    monitors_lock: Optional[threading.Lock] = None,
+):
     """监控单个频道"""
     crawler = WallStreetCNLiveCrawler()
     monitor = WallStreetCNMonitor(
@@ -97,15 +124,23 @@ def monitor_channel(channel_name, interval=30, important_only=False):
         channel=channel_name,
         important_only=important_only,
     )
+    if monitors is not None:
+        if monitors_lock is not None:
+            with monitors_lock:
+                monitors.append(monitor)
+        else:
+            monitors.append(monitor)
 
     def callback(items):
-        on_new_items(channel_name, items)
+        on_new_items(channel_name, items, output_dir=output_dir)
 
     print(f"🚀 启动 {channel_name} 监控")
     monitor.start(callback=callback)
 
 
-def fetch_mode(channels, limit=20, important_only=False):
+def fetch_mode(
+    channels, limit=20, important_only=False, output_dir: Optional[str] = None
+):
     """单次抓取多个频道"""
     crawler = WallStreetCNLiveCrawler()
     filter_msg = "重要快讯" if important_only else "全部快讯"
@@ -116,7 +151,7 @@ def fetch_mode(channels, limit=20, important_only=False):
         )
         if items:
             print(f"✅ {channel} 获取到 {len(items)} 条快讯")
-            on_new_items(channel, items)
+            on_new_items(channel, items, output_dir=output_dir)
         else:
             print(f"❌ {channel} 未获取到快讯")
 
@@ -148,7 +183,11 @@ def main():
     )
 
     parser.add_argument(
-        "--interval", "-i", type=int, default=30, help="轮询间隔（秒） (默认: 30)"
+        "--interval",
+        "-i",
+        type=_positive_int,
+        default=30,
+        help="轮询间隔（秒） (默认: 30)",
     )
 
     parser.add_argument("--important", action="store_true", help="只监控重要快讯")
@@ -156,11 +195,17 @@ def main():
     parser.add_argument("--fetch", "-f", action="store_true", help="单次抓取模式")
 
     parser.add_argument(
-        "--limit", "-l", type=int, default=20, help="单次抓取数量 (默认: 20)"
+        "--limit", "-l", type=_positive_int, default=20, help="单次抓取数量 (默认: 20)"
     )
 
     parser.add_argument(
         "--channels", nargs="+", default=COMMODITY_CHANNELS, help="要监控的频道列表"
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="输出目录 (默认: output/report/cleaned)",
     )
 
     args = parser.parse_args()
@@ -178,16 +223,29 @@ def main():
     print()
 
     if args.fetch:
-        fetch_mode(args.channels, limit=args.limit, important_only=args.important)
+        fetch_mode(
+            args.channels,
+            limit=args.limit,
+            important_only=args.important,
+            output_dir=args.output,
+        )
         return
 
     # 创建多个监控线程
     threads = []
+    monitors: List[WallStreetCNMonitor] = []
+    monitors_lock = threading.Lock()
     for channel in args.channels:
         t = threading.Thread(
             target=monitor_channel,
-            args=(channel, args.interval, args.important),
-            daemon=True,
+            args=(
+                channel,
+                args.interval,
+                args.important,
+                args.output,
+                monitors,
+                monitors_lock,
+            ),
         )
         t.start()
         threads.append(t)
@@ -199,6 +257,24 @@ def main():
             t.join()
     except KeyboardInterrupt:
         print("\n\n⏹️ 监控已停止")
+        with monitors_lock:
+            active_monitors = list(monitors)
+        for monitor in active_monitors:
+            try:
+                monitor.stop()
+            except Exception as exc:
+                print(f"⚠️ 停止监控器失败: {exc}")
+
+        for t in threads:
+            try:
+                t.join(timeout=max(args.interval, 1) + 1)
+            except TypeError:
+                try:
+                    t.join()
+                except KeyboardInterrupt:
+                    continue
+            except KeyboardInterrupt:
+                continue
         sys.exit(0)
 
 

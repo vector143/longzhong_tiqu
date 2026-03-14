@@ -9,7 +9,6 @@
 """
 
 from .keyboard import KeyboardListener
-from .runner import run_monitor
 from .scheduler import CrawlScheduler
 from .state import ArticleRecord, MonitorState, PollRecord
 from .ui import MonitorUI
@@ -40,3 +39,10 @@ __all__ = [
     # 入口
     "run_monitor",
 ]
+
+
+def run_monitor(*args, **kwargs):
+    """懒加载入口，避免 `python -m monitor.runner` 时包级预加载子模块。"""
+    from .runner import run_monitor as _run_monitor
+
+    return _run_monitor(*args, **kwargs)
