@@ -268,3 +268,45 @@ def test_unified_ui_renders_download_stats_panel_with_per_source_counts() -> Non
     assert "10" in rendered
     assert "20" in rendered
     assert "30" in rendered
+
+
+def test_unified_ui_renders_warning_module_in_download_stats() -> None:
+    manager = MonitorManager()
+
+    investing = _DummyAdapter(
+        "Investing.com",
+        status=MonitorStatus.ERROR,
+        items_count=0,
+        total_items=5,
+        extra={
+            "consecutive_failures": 2,
+            "backoff_seconds": 10,
+        },
+    )
+    investing._state.last_error = "Investing: request timeout"
+    manager.register(investing)
+
+    wsj = _DummyAdapter(
+        "华尔街见闻",
+        status=MonitorStatus.RUNNING,
+        items_count=1,
+        total_items=20,
+        extra={
+            "consecutive_failures": 1,
+            "backoff_seconds": 5,
+        },
+    )
+    manager.register(wsj)
+
+    console = Console(record=True, width=140)
+    ui = UnifiedMonitorUI(manager, refresh_rate=0.2, console=console)
+
+    console.print(ui._create_layout())
+    rendered = console.export_text()
+
+    assert "下载统计" in rendered
+    assert "告警:" in rendered
+    assert "Investing.com" in rendered
+    assert "ERROR" in rendered
+    assert "华尔街见闻" in rendered
+    assert "WARN" in rendered

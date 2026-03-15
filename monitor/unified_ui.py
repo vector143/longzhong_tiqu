@@ -136,12 +136,13 @@ class UnifiedMonitorUI:
     def _create_download_stats(self) -> Panel:
         states = self.manager.get_all_states()
         table = Table(box=box.SIMPLE_HEAVY, expand=True)
-        table.add_column("来源", width=14, no_wrap=True, overflow="ellipsis")
+        table.add_column("来源", min_width=12, overflow="fold")
         table.add_column("本轮", justify="right", width=4)
         table.add_column("累计", justify="right", width=6)
         table.add_column("占比", justify="right", width=6)
 
         total_downloaded = sum(state.total_items for state in states.values())
+        warning_summaries = []
         if not states:
             table.add_row("暂无监控源", "-", "-", "-")
         else:
@@ -151,6 +152,11 @@ class UnifiedMonitorUI:
                     if total_downloaded > 0
                     else "0.0%"
                 )
+                warning_level, _warning_detail = self._build_warning_level_and_detail(
+                    state
+                )
+                if warning_level != "-":
+                    warning_summaries.append(f"{name}({warning_level})")
                 table.add_row(
                     name,
                     str(state.items_count),
@@ -158,7 +164,15 @@ class UnifiedMonitorUI:
                     ratio,
                 )
 
-        return Panel(table, title="下载统计", border_style="blue")
+        subtitle = None
+        if warning_summaries:
+            subtitle = f"告警: {self._join_values(warning_summaries, limit=2)}"
+        return Panel(
+            table,
+            title="下载统计",
+            subtitle=subtitle,
+            border_style="red" if warning_summaries else "blue",
+        )
 
     def _create_selected_detail(self) -> Panel:
         selected_name = self.manager.get_selected_name()
@@ -243,7 +257,7 @@ class UnifiedMonitorUI:
             Layout(name="footer", size=3),
         )
         layout["body"].split_row(
-            Layout(name="sources", size=42),
+            Layout(name="sources", size=48),
             Layout(name="details", ratio=1),
         )
         layout["sources"].split_column(
@@ -362,6 +376,26 @@ class UnifiedMonitorUI:
             return None
         pairs = [f"{channel}:{count}" for channel, count in stats.items()]
         return self._join_values(pairs, limit=3)
+
+    def _build_warning_level_and_detail(self, state: MonitorState) -> tuple[str, str]:
+        extra = state.extra
+        failures = int(extra.get("consecutive_failures", 0) or 0)
+        backoff_seconds = float(extra.get("backoff_seconds", 0) or 0)
+        has_error = state.status == MonitorStatus.ERROR or bool(state.last_error)
+        has_warning = failures > 0 or backoff_seconds > 0
+
+        if not has_error and not has_warning:
+            return "-", "-"
+
+        level = "ERROR" if has_error else "WARN"
+        detail_parts = []
+        if failures > 0:
+            detail_parts.append(f"连续失败 {failures}")
+        if backoff_seconds > 0:
+            detail_parts.append(f"退避 {self._format_seconds(backoff_seconds)}")
+        if state.last_error:
+            detail_parts.append(state.last_error[:30])
+        return level, " | ".join(detail_parts) or "-"
 
     def _build_runtime_control_summary(self, state: MonitorState) -> Optional[str]:
         extra = state.extra

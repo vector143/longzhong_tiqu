@@ -21,3 +21,4 @@
 - 统一控制台如果要可靠支持 per-source restart，生命周期字段不能散落在各 adapter 的 `extra` 拼装里；像 [monitor/adapter.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapter.py) 这类基类必须统一持有 `runtime_mode/runtime_status/runtime_worker_count/runtime_restarts` 与 start/stop hooks，adapter 只负责补自己的 reset/worker 同步逻辑。
 - 统一入口的性能参数必须打通到底层真实执行点：像 `InvestingAdapter` 里 `delay/workers` 不能只停留在 UI 或上层方法参数，必须注入 [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py) 的 `rate_limit/max_workers`，否则“已配置限速/并发”只是表象。
 - 自适应轮询要与错误退避语义分离：空轮询扩容（`30→60→120`）只用于“成功但无新增”，失败路径仍固定 backoff（如 `10s`）并重置 idle 计数，否则会出现“错误后长时间不重试”的误判。
+- Unified UI 增加告警展示时，优先复用现有面板而不是盲目新增布局块；固定终端尺寸下新增独立 panel 很容易触发信息裁切（尤其下载统计/详情区），更稳妥做法是把告警级别与摘要整合进 [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py) 的下载统计区。
