@@ -305,8 +305,33 @@ def test_unified_ui_renders_warning_module_in_download_stats() -> None:
     rendered = console.export_text()
 
     assert "下载统计" in rendered
-    assert "告警:" in rendered
+    assert "告警" in rendered
+    assert "E:1 W:1" in rendered
     assert "Investing.com" in rendered
-    assert "ERROR" in rendered
     assert "华尔街见闻" in rendered
-    assert "WARN" in rendered
+
+
+def test_unified_ui_does_not_warn_when_only_stale_last_error_exists() -> None:
+    manager = MonitorManager()
+
+    adapter = _DummyAdapter(
+        "Investing.com",
+        status=MonitorStatus.RUNNING,
+        items_count=1,
+        total_items=9,
+        extra={
+            "consecutive_failures": 0,
+            "backoff_seconds": 0,
+        },
+    )
+    adapter._state.last_error = "历史错误: timeout"
+    manager.register(adapter)
+
+    console = Console(record=True, width=120)
+    ui = UnifiedMonitorUI(manager, refresh_rate=0.2, console=console)
+
+    console.print(ui._create_layout())
+    rendered = console.export_text()
+
+    assert "下载统计" in rendered
+    assert "告警:" not in rendered

@@ -22,3 +22,4 @@
 - 统一入口的性能参数必须打通到底层真实执行点：像 `InvestingAdapter` 里 `delay/workers` 不能只停留在 UI 或上层方法参数，必须注入 [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py) 的 `rate_limit/max_workers`，否则“已配置限速/并发”只是表象。
 - 自适应轮询要与错误退避语义分离：空轮询扩容（`30→60→120`）只用于“成功但无新增”，失败路径仍固定 backoff（如 `10s`）并重置 idle 计数，否则会出现“错误后长时间不重试”的误判。
 - Unified UI 增加告警展示时，优先复用现有面板而不是盲目新增布局块；固定终端尺寸下新增独立 panel 很容易触发信息裁切（尤其下载统计/详情区），更稳妥做法是把告警级别与摘要整合进 [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py) 的下载统计区。
+- 告警分级要区分“当前错误状态”和“历史错误文本”：UI 里不能仅凭 `last_error` 非空就判定 `ERROR`，否则恢复后会长期误报；`last_error` 更适合作为详情补充，级别判断应以 `status` 和实时失败/退避计数为主。

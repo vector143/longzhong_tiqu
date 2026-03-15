@@ -136,13 +136,14 @@ class UnifiedMonitorUI:
     def _create_download_stats(self) -> Panel:
         states = self.manager.get_all_states()
         table = Table(box=box.SIMPLE_HEAVY, expand=True)
-        table.add_column("来源", min_width=12, overflow="fold")
+        table.add_column("来源", width=14, no_wrap=True, overflow="ellipsis")
         table.add_column("本轮", justify="right", width=4)
         table.add_column("累计", justify="right", width=6)
         table.add_column("占比", justify="right", width=6)
 
         total_downloaded = sum(state.total_items for state in states.values())
-        warning_summaries = []
+        error_count = 0
+        warn_count = 0
         if not states:
             table.add_row("暂无监控源", "-", "-", "-")
         else:
@@ -155,8 +156,10 @@ class UnifiedMonitorUI:
                 warning_level, _warning_detail = self._build_warning_level_and_detail(
                     state
                 )
-                if warning_level != "-":
-                    warning_summaries.append(f"{name}({warning_level})")
+                if warning_level == "ERROR":
+                    error_count += 1
+                elif warning_level == "WARN":
+                    warn_count += 1
                 table.add_row(
                     name,
                     str(state.items_count),
@@ -165,13 +168,14 @@ class UnifiedMonitorUI:
                 )
 
         subtitle = None
-        if warning_summaries:
-            subtitle = f"告警: {self._join_values(warning_summaries, limit=2)}"
+        has_warning = error_count > 0 or warn_count > 0
+        if has_warning:
+            subtitle = f"告警 E:{error_count} W:{warn_count}"
         return Panel(
             table,
             title="下载统计",
             subtitle=subtitle,
-            border_style="red" if warning_summaries else "blue",
+            border_style="red" if has_warning else "blue",
         )
 
     def _create_selected_detail(self) -> Panel:
@@ -257,7 +261,7 @@ class UnifiedMonitorUI:
             Layout(name="footer", size=3),
         )
         layout["body"].split_row(
-            Layout(name="sources", size=48),
+            Layout(name="sources", size=42),
             Layout(name="details", ratio=1),
         )
         layout["sources"].split_column(
@@ -381,7 +385,7 @@ class UnifiedMonitorUI:
         extra = state.extra
         failures = int(extra.get("consecutive_failures", 0) or 0)
         backoff_seconds = float(extra.get("backoff_seconds", 0) or 0)
-        has_error = state.status == MonitorStatus.ERROR or bool(state.last_error)
+        has_error = state.status == MonitorStatus.ERROR
         has_warning = failures > 0 or backoff_seconds > 0
 
         if not has_error and not has_warning:
