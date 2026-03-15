@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from clients import AsyncMemoryQiniuUploader, OilChemCookiesManager
@@ -290,6 +291,220 @@ def _run_history_crawl(
     print("=" * 50 + "\n")
 
 
+@dataclass
+class MonitorRuntime:
+    """隆众监控运行时资源包，可供 CLI 和嵌入式适配器复用。"""
+
+    state: MonitorState
+    cookies_manager: OilChemCookiesManager
+    pid_manager: Optional[PidFileManager] = None
+    qiniu_uploader: Optional[AsyncMemoryQiniuUploader] = None
+    scheduler: Optional[CrawlScheduler] = None
+    scheduler_controller: Optional[MultiCrawlScheduler] = None
+    keyboard: Optional[KeyboardListener] = None
+
+    @property
+    def controller(self):
+        """统一返回单关键词或多关键词调度控制器。"""
+        return self.scheduler_controller or self.scheduler
+
+    def start(self) -> None:
+        """启动调度器。"""
+        start_monitor_runtime(self)
+
+    def stop(self, wait_for_job: bool = True, timeout: float = 60.0) -> None:
+        """停止并清理运行时资源。"""
+        stop_monitor_runtime(self, wait_for_job=wait_for_job, timeout=timeout)
+
+    def pause(self) -> None:
+        """暂停调度器。"""
+        controller = self.controller
+        if controller is not None and getattr(controller, "is_running", False):
+            controller.pause()
+
+    def resume(self) -> None:
+        """恢复调度器。"""
+        controller = self.controller
+        if controller is not None and getattr(controller, "is_running", False):
+            controller.resume()
+
+    def run_now(self) -> None:
+        """触发立即执行。"""
+        controller = self.controller
+        if controller is not None:
+            controller.run_now()
+
+
+def build_monitor_runtime(
+    keywords: List[str],
+    interval_minutes: int,
+    *,
+    no_history: bool = False,
+    days_back: Optional[int] = 30,
+    hours_back: Optional[int] = None,
+    pages_to_crawl: Optional[int] = 3,
+    settings=None,
+    force: bool = False,
+    enable_pid: bool = True,
+    monitor_enabled: bool = True,
+    print_preflight: bool = True,
+) -> MonitorRuntime:
+    """
+    构建可复用的隆众监控运行时资源。
+
+    该函数只负责资源初始化，不创建 UI 或信号处理器。
+    """
+    settings = settings or get_settings()
+    monitor_cfg = settings.monitor
+    state = MonitorState(
+        recent_limit=monitor_cfg.recent_articles_limit,
+        poll_history_limit=monitor_cfg.poll_history_limit,
+    )
+    cookies_manager = OilChemCookiesManager(settings.crawler.cookies_file)
+    runtime = MonitorRuntime(state=state, cookies_manager=cookies_manager)
+
+    try:
+        if enable_pid:
+            pid_manager = PidFileManager()
+            try:
+                pid_manager.create()
+            except RuntimeError:
+                if not force:
+                    raise
+                print("⚠️ 使用 --force 强制启动")
+                pid_manager.force_cleanup()
+                pid_manager.create()
+            runtime.pid_manager = pid_manager
+
+        ok, errors, warnings = _preflight_check(cookies_manager)
+        if print_preflight:
+            _print_preflight(errors, warnings)
+        if not ok:
+            raise RuntimeError("启动前预检未通过")
+
+        if no_history:
+            if print_preflight:
+                print("⏭️ 已按 --no-history/--monitor-only 跳过历史爬取")
+        else:
+            _run_history_crawl(
+                keywords=keywords,
+                days_back=days_back,
+                hours_back=hours_back,
+                pages_to_crawl=pages_to_crawl,
+                settings=settings,
+            )
+
+        if not monitor_enabled:
+            return runtime
+
+        if settings.output.upload_to_qiniu:
+            qiniu_config = settings.get_qiniu_config()
+            if qiniu_config:
+                runtime.qiniu_uploader = AsyncMemoryQiniuUploader(
+                    qiniu_config["access_key"],
+                    qiniu_config["secret_key"],
+                    qiniu_config["bucket_name"],
+                    prefix=qiniu_config.get("prefix", "crawled_articles"),
+                    max_upload_workers=settings.crawler.max_upload_workers,
+                )
+                runtime.qiniu_uploader.start_upload_workers()
+                if print_preflight:
+                    print("✅ 七牛云上传器已启动")
+            elif print_preflight:
+                print("⚠️ 七牛云上传已启用但配置缺失，已跳过上传")
+        elif print_preflight:
+            print("⏸️ 七牛云上传已禁用")
+
+        naming_system = UniversalNamingSystem(settings.crawler.project_code)
+        existing_ids = ThreadSafeSet(naming_system.load_existing_article_ids())
+        if print_preflight:
+            print(f"📌 已加载 {len(existing_ids)} 个历史文章 ID")
+
+        converter = AsyncFormatConverter(
+            base_dir=settings.crawler.base_dir,
+            qiniu_uploader=runtime.qiniu_uploader,
+            naming_system=naming_system,
+            save_locally=settings.output.save_locally,
+            upload_to_qiniu=settings.output.upload_to_qiniu,
+        )
+
+        shared_request_gate = None
+        shared_rate_limiter = None
+        if len(keywords) > 1:
+            shared_request_gate = threading.RLock()
+            shared_rate_limiter = TokenBucketRateLimiter(
+                requests_per_minute=getattr(monitor_cfg, "requests_per_minute", 30),
+                min_interval=getattr(monitor_cfg, "min_request_interval", 0.5),
+            )
+
+        schedulers: List[CrawlScheduler] = []
+        for keyword in keywords:
+            schedulers.append(
+                CrawlScheduler(
+                    state,
+                    interval_minutes=interval_minutes,
+                    keyword=keyword,
+                    cookies_manager=cookies_manager,
+                    converter=converter,
+                    existing_ids=existing_ids,
+                    output_formats=settings.output.default_formats.copy(),
+                    max_pages=monitor_cfg.max_pages_per_poll,
+                    early_stop_threshold=monitor_cfg.early_stop_threshold,
+                    validate_session_before_poll=monitor_cfg.validate_session_before_poll,
+                    max_retries=monitor_cfg.max_retries,
+                    retry_base_delay=monitor_cfg.retry_base_delay,
+                    manage_state_pause=len(keywords) == 1,
+                    request_gate=shared_request_gate,
+                    rate_limiter=shared_rate_limiter,
+                )
+            )
+
+        if len(schedulers) == 1:
+            runtime.scheduler = schedulers[0]
+        else:
+            runtime.scheduler_controller = MultiCrawlScheduler(schedulers, state)
+
+        return runtime
+
+    except Exception:
+        stop_monitor_runtime(runtime, wait_for_job=False, timeout=1.0)
+        raise
+
+
+def start_monitor_runtime(runtime: MonitorRuntime) -> None:
+    """启动运行时调度器。"""
+    controller = runtime.controller
+    if controller is not None:
+        controller.start()
+
+
+def stop_monitor_runtime(
+    runtime: MonitorRuntime,
+    wait_for_job: bool = True,
+    timeout: float = 60.0,
+) -> None:
+    """停止运行时调度器并清理资源。"""
+    controller = runtime.controller
+    if controller is not None and getattr(controller, "is_running", False):
+        controller.stop(wait_for_job=wait_for_job, timeout=timeout)
+
+    if runtime.qiniu_uploader is not None:
+        try:
+            runtime.qiniu_uploader.wait_for_completion()
+        except Exception as exc:
+            print(f"⚠️ 等待上传完成时异常: {exc}")
+        runtime.qiniu_uploader.stop_upload_workers()
+        runtime.qiniu_uploader = None
+
+    if runtime.keyboard is not None and runtime.keyboard.is_running:
+        runtime.keyboard.stop()
+    runtime.keyboard = None
+
+    if runtime.pid_manager is not None:
+        runtime.pid_manager.cleanup()
+        runtime.pid_manager = None
+
+
 def run_monitor(argv: Optional[List[str]] = None) -> int:
     """
     运行监控系统
@@ -326,38 +541,8 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
         overlap_text = "，".join(f"{left}/{right}" for left, right in overlap_pairs)
         print(f"⚠️ 关键词存在重叠，可能增加重复命中与无效抓取: {overlap_text}")
 
-    # 初始化状态管理器
-    state = MonitorState(
-        recent_limit=monitor_cfg.recent_articles_limit,
-        poll_history_limit=monitor_cfg.poll_history_limit,
-    )
-
-    # Cookie 管理器
-    cookies_manager = OilChemCookiesManager(settings.crawler.cookies_file)
-
-    # PID 文件检查
-    pid_manager = PidFileManager()
-    try:
-        pid_manager.create()
-    except RuntimeError as exc:
-        print(f"❌ {exc}")
-        if not args.force:
-            return 1
-        # L7: --force 参数时先强制清理再重新创建
-        print("⚠️ 使用 --force 强制启动")
-        pid_manager.force_cleanup()
-        try:
-            pid_manager.create()
-        except RuntimeError as exc2:
-            print(f"❌ 强制启动失败: {exc2}")
-            return 1
-
-    # 资源变量
-    qiniu_uploader: Optional[AsyncMemoryQiniuUploader] = None
-    scheduler: Optional[CrawlScheduler] = None
-    scheduler_controller: Optional[MultiCrawlScheduler] = None
+    runtime: Optional[MonitorRuntime] = None
     ui: Optional[MonitorUI] = None
-    keyboard: Optional[KeyboardListener] = None
     stop_event = threading.Event()
 
     def _handle_signal(signum, _frame) -> None:
@@ -368,10 +553,10 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
 
         if ui is not None:
             ui.stop()
-        if scheduler_controller is not None and scheduler_controller.is_running:
-            scheduler_controller.stop(wait_for_job=True)
-        elif scheduler is not None and scheduler.is_running:
-            scheduler.stop(wait_for_job=True)
+        if runtime is not None and runtime.controller is not None:
+            controller = runtime.controller
+            if getattr(controller, "is_running", False):
+                controller.stop(wait_for_job=True)
 
     # 注册信号处理（仅在主线程）
     if threading.current_thread() is threading.main_thread():
@@ -382,113 +567,37 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
         print("⚠️ 当前非主线程运行，信号处理已禁用")
 
     try:
-        # 启动前预检
-        ok, errors, warnings = _preflight_check(cookies_manager)
-        _print_preflight(errors, warnings)
+        runtime = build_monitor_runtime(
+            keywords=keywords,
+            interval_minutes=interval_minutes,
+            no_history=args.no_history,
+            days_back=args.days,
+            hours_back=args.hours,
+            pages_to_crawl=args.pages,
+            settings=settings,
+            force=args.force,
+            enable_pid=True,
+            monitor_enabled=not args.no_monitor,
+            print_preflight=True,
+        )
 
-        if not ok:
-            print("❌ 启动前预检未通过，退出")
-            return 1
-
-        # 执行历史爬取（如果指定了 --days/--hours/--pages）
-        if args.no_history:
-            print("⏭️ 已按 --no-history/--monitor-only 跳过历史爬取")
-        else:
-            _run_history_crawl(
-                keywords=keywords,
-                days_back=args.days,
-                hours_back=args.hours,
-                pages_to_crawl=args.pages,
-                settings=settings,
-            )
-
-        # 如果指定了 --no-monitor，跳过监控直接退出
         if args.no_monitor:
             print("⏹️ 已按 --no-monitor 跳过监控")
             return 0
 
-        # 初始化七牛上传器
-        if settings.output.upload_to_qiniu:
-            qiniu_config = settings.get_qiniu_config()
-            if qiniu_config:
-                qiniu_uploader = AsyncMemoryQiniuUploader(
-                    qiniu_config["access_key"],
-                    qiniu_config["secret_key"],
-                    qiniu_config["bucket_name"],
-                    prefix=qiniu_config.get("prefix", "crawled_articles"),
-                    max_upload_workers=settings.crawler.max_upload_workers,
-                )
-                qiniu_uploader.start_upload_workers()
-                print("✅ 七牛云上传器已启动")
-            else:
-                print("⚠️ 七牛云上传已启用但配置缺失，已跳过上传")
-        else:
-            print("⏸️ 七牛云上传已禁用")
-
-        # 加载历史文章 ID（使用线程安全集合）
-        naming_system = UniversalNamingSystem(settings.crawler.project_code)
-        existing_ids = ThreadSafeSet(naming_system.load_existing_article_ids())
-        print(f"📌 已加载 {len(existing_ids)} 个历史文章 ID")
-
-        # 初始化格式转换器
-        converter = AsyncFormatConverter(
-            base_dir=settings.crawler.base_dir,
-            qiniu_uploader=qiniu_uploader,
-            naming_system=naming_system,
-            save_locally=settings.output.save_locally,
-            upload_to_qiniu=settings.output.upload_to_qiniu,
-        )
-
-        # 多关键词共用同一个请求闸门和限流器，避免共享会话并发乱序
-        shared_request_gate = None
-        shared_rate_limiter = None
-        if len(keywords) > 1:
-            shared_request_gate = threading.RLock()
-            shared_rate_limiter = TokenBucketRateLimiter(
-                requests_per_minute=getattr(monitor_cfg, "requests_per_minute", 30),
-                min_interval=getattr(monitor_cfg, "min_request_interval", 0.5),
-            )
-
-        # 初始化调度器
-        schedulers: List[CrawlScheduler] = []
-        for keyword in keywords:
-            schedulers.append(
-                CrawlScheduler(
-                    state,
-                    interval_minutes=interval_minutes,
-                    keyword=keyword,
-                    cookies_manager=cookies_manager,
-                    converter=converter,
-                    existing_ids=existing_ids,
-                    output_formats=settings.output.default_formats.copy(),
-                    max_pages=monitor_cfg.max_pages_per_poll,
-                    early_stop_threshold=monitor_cfg.early_stop_threshold,
-                    validate_session_before_poll=monitor_cfg.validate_session_before_poll,
-                    max_retries=monitor_cfg.max_retries,
-                    retry_base_delay=monitor_cfg.retry_base_delay,
-                    manage_state_pause=len(keywords) == 1,
-                    request_gate=shared_request_gate,
-                    rate_limiter=shared_rate_limiter,
-                )
-            )
-
-        if len(schedulers) == 1:
-            scheduler = schedulers[0]
-            scheduler.start()
-        else:
-            scheduler_controller = MultiCrawlScheduler(schedulers, state)
-            scheduler_controller.start()
+        start_monitor_runtime(runtime)
 
         if interactive:
             # 交互模式：启动 Rich UI
             keyboard = KeyboardListener()
+            runtime.keyboard = keyboard
             # 计算刷新率，避免除零
             refresh_interval = monitor_cfg.ui_refresh_interval
             if refresh_interval <= 0:
                 refresh_interval = 1.0
             ui = MonitorUI(
-                state,
-                scheduler_controller or scheduler,
+                runtime.state,
+                runtime.controller,
                 keyboard_listener=keyboard,
                 refresh_per_second=1.0 / refresh_interval,
                 recent_limit=monitor_cfg.recent_articles_limit,
@@ -510,8 +619,16 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
 
         return 0
 
+    except RuntimeError as exc:
+        if str(exc) == "启动前预检未通过":
+            print("❌ 启动前预检未通过，退出")
+            return 1
+        print(f"❌ {exc}")
+        return 1
+
     except Exception as exc:
-        state.set_error(f"监控运行异常: {exc}")
+        if runtime is not None:
+            runtime.state.set_error(f"监控运行异常: {exc}")
         print(f"❌ 监控运行异常: {exc}")
         import traceback
 
@@ -519,31 +636,10 @@ def run_monitor(argv: Optional[List[str]] = None) -> int:
         return 1
 
     finally:
-        # 资源清理（顺序重要：先停调度器等待轮询 -> 等待上传 -> 停键盘 -> 清PID）
-        print("\n🧹 正在清理资源...")
-
-        # 1. 先停止调度器，等待当前轮询完成
-        if scheduler_controller is not None and scheduler_controller.is_running:
-            scheduler_controller.stop(wait_for_job=True, timeout=60.0)
-        elif scheduler is not None and scheduler.is_running:
-            scheduler.stop(wait_for_job=True, timeout=60.0)
-
-        # 2. 等待上传队列完成（轮询已停，不会有新上传）
-        if qiniu_uploader is not None:
-            try:
-                print("⏳ 等待上传队列完成...")
-                qiniu_uploader.wait_for_completion()
-            except Exception as exc:
-                print(f"⚠️ 等待上传完成时异常: {exc}")
-            qiniu_uploader.stop_upload_workers()
-
-        # 3. 停止键盘监听
-        if keyboard is not None and keyboard.is_running:
-            keyboard.stop()
-
-        # 4. 最后清理 PID 文件
-        pid_manager.cleanup()
-        print("✅ 资源清理完成")
+        if runtime is not None:
+            print("\n🧹 正在清理资源...")
+            stop_monitor_runtime(runtime, wait_for_job=True, timeout=60.0)
+            print("✅ 资源清理完成")
 
 
 def main() -> None:

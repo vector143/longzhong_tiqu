@@ -226,114 +226,131 @@ class LongZhongAdapter(MonitorAdapter):
         self.keywords = keywords
         self.interval = interval
         self.no_history = no_history
+        self._runtime = None
         self._state.extra["keywords"] = keywords
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "minutes"
+        self._state.extra["runtime_mode"] = "embedded"
+
+    def _runtime_controller(self):
+        """获取嵌入式 runtime 的调度控制器。"""
+        if self._runtime is None:
+            return None
+        return getattr(self._runtime, "controller", None)
+
+    def _sync_runtime_state(self) -> None:
+        """将正式 runtime 的状态快照映射到统一控制台状态。"""
+        if self._runtime is None or getattr(self._runtime, "state", None) is None:
+            return
+
+        snapshot = self._runtime.state.get_snapshot()
+        status_map = {
+            "idle": MonitorStatus.IDLE,
+            "running": MonitorStatus.RUNNING,
+            "paused": MonitorStatus.PAUSED,
+            "error": MonitorStatus.ERROR,
+        }
+        self._state.status = status_map.get(snapshot.get("status"), self._state.status)
+        self._state.last_error = snapshot.get("last_error")
+        self._state.running_time = float(snapshot.get("uptime_seconds", 0.0))
+
+        poll_history = snapshot.get("poll_history") or []
+        recent_articles = snapshot.get("recent_articles") or []
+        latest_poll = poll_history[0] if poll_history else None
+
+        self._state.items_count = int(getattr(latest_poll, "new_count", 0))
+        self._state.total_items = int(snapshot.get("today_success", 0))
+        self._state.last_run = getattr(
+            latest_poll,
+            "poll_time",
+            recent_articles[0].crawl_time if recent_articles else None,
+        )
+
+        self._state.extra["current_keyword"] = getattr(
+            latest_poll,
+            "keyword",
+            recent_articles[0].keyword if recent_articles else None,
+        )
+        self._state.extra["next_poll_time"] = snapshot.get("next_poll_time")
+        self._state.extra["total_polls"] = int(snapshot.get("total_polls", 0))
+        self._state.extra["today_total"] = int(snapshot.get("today_total", 0))
+        self._state.extra["today_success"] = int(snapshot.get("today_success", 0))
+        self._state.extra["today_failed"] = int(snapshot.get("today_failed", 0))
+        self._state.extra["today_skipped"] = int(snapshot.get("today_skipped", 0))
+        self._state.extra["recent_items"] = [
+            {
+                "time": article.crawl_time.strftime("%H:%M:%S"),
+                "title": article.title,
+            }
+            for article in recent_articles[:5]
+        ]
+
+    def pause(self):
+        """优先委托正式 runtime 暂停。"""
+        controller = self._runtime_controller()
+        if controller is not None:
+            controller.pause()
+            self._sync_runtime_state()
+            return
+        super().pause()
+
+    def resume(self):
+        """优先委托正式 runtime 恢复。"""
+        controller = self._runtime_controller()
+        if controller is not None:
+            controller.resume()
+            self._sync_runtime_state()
+            return
+        super().resume()
+
+    def run_now(self):
+        """优先委托正式 runtime 立即运行。"""
+        controller = self._runtime_controller()
+        if controller is not None:
+            controller.run_now()
+            self._sync_runtime_state()
+            return
+        super().run_now()
+
+    def get_state(self):
+        """优先返回正式 runtime 的映射状态。"""
+        if self._runtime is not None:
+            self._sync_runtime_state()
+            return self._state
+        return super().get_state()
 
     def _run(self):
-        """运行监控 - 使用简化的调度逻辑"""
+        """运行监控 - 复用正式 runner/scheduler/state 链路。"""
         try:
-            from clients import OilChemCookiesManager
-            from config import get_settings
-            from crawl.pipeline import extract_from_keyword_async_multithread
+            from monitor.runner import (
+                build_monitor_runtime,
+                start_monitor_runtime,
+                stop_monitor_runtime,
+            )
 
-            settings = get_settings()
+            self._runtime = build_monitor_runtime(
+                keywords=self.keywords,
+                interval_minutes=self.interval,
+                no_history=self.no_history,
+                enable_pid=False,
+                print_preflight=False,
+            )
+            start_monitor_runtime(self._runtime)
 
-            # Cookie 管理器
-            cookies_manager = OilChemCookiesManager(settings.crawler.cookies_file)
-            if not cookies_manager.load_cookies():
-                self._state.status = MonitorStatus.ERROR
-                self._state.last_error = "Cookie 加载失败"
-                return
-
-            # 如果不跳过历史，先执行历史爬取
-            if not self.no_history:
-                for keyword in self.keywords:
-                    if self.should_stop():
-                        break
-
-                    self._state.last_run = datetime.now()
-                    self._state.extra["current_keyword"] = keyword
-
-                    extract_from_keyword_async_multithread(
-                        keyword=keyword,
-                        pages_to_crawl=3,
-                        days_back=30,
-                        output_formats=settings.output.default_formats.copy(),
-                        qiniu_config=(
-                            settings.get_qiniu_config()
-                            if settings.output.upload_to_qiniu
-                            else None
-                        ),
-                        save_locally=settings.output.save_locally,
-                        upload_to_qiniu=settings.output.upload_to_qiniu,
-                        max_crawl_workers=settings.crawler.max_crawl_workers,
-                        max_upload_workers=settings.crawler.max_upload_workers,
-                    )
-
-            # 持续监控模式
-            round_num = 1
             while not self.should_stop():
-                try:
-                    if not self.wait_if_paused():
-                        break
-                    self._state.last_run = datetime.now()
-                    self._state.extra["round"] = round_num
-                    recent_items = []
-
-                    for keyword in self.keywords:
-                        if self.should_stop():
-                            break
-
-                        self._state.extra["current_keyword"] = keyword
-
-                        # 执行增量爬取
-                        extract_from_keyword_async_multithread(
-                            keyword=keyword,
-                            pages_to_crawl=3,
-                            days_back=None,
-                            hours_back=None,
-                            output_formats=settings.output.default_formats.copy(),
-                            qiniu_config=(
-                                settings.get_qiniu_config()
-                                if settings.output.upload_to_qiniu
-                                else None
-                            ),
-                            save_locally=settings.output.save_locally,
-                            upload_to_qiniu=settings.output.upload_to_qiniu,
-                            max_crawl_workers=settings.crawler.max_crawl_workers,
-                            max_upload_workers=settings.crawler.max_upload_workers,
-                        )
-
-                        self._state.items_count += 1  # 简化计数
-                        self._state.total_items += 1
-                        recent_items.append(
-                            {
-                                "time": self._state.last_run.strftime("%H:%M:%S"),
-                                "title": f"完成关键词: {keyword}",
-                            }
-                        )
-
-                    self._state.extra["recent_items"] = recent_items[:5]
-
-                    # 成功后恢复状态
-                    if self._state.status == MonitorStatus.ERROR:
-                        self._state.status = MonitorStatus.RUNNING
-
-                    round_num += 1
-
-                    # 等待下一轮（分钟转秒）
-                    wait_seconds = self.interval * 60
-                    if not self.wait_interval(wait_seconds):
-                        break
-
-                except Exception as e:
-                    self._state.status = MonitorStatus.ERROR
-                    self._state.last_error = f"隆众: {e}"
-                    # 失败后等待1分钟再重试
-                    if not self.wait_interval(60):
-                        break
+                self._sync_runtime_state()
+                if not self.wait_interval(1):
+                    break
 
         except Exception as e:
             self._state.status = MonitorStatus.ERROR
             self._state.last_error = f"初始化失败: {e}"
+        finally:
+            if self._runtime is not None:
+                try:
+                    self._sync_runtime_state()
+                    from monitor.runner import stop_monitor_runtime
+
+                    stop_monitor_runtime(self._runtime, wait_for_job=True, timeout=60.0)
+                finally:
+                    self._runtime = None
