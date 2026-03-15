@@ -42,7 +42,7 @@ def parse_args():
   python unified_monitor.py --inv-proxy http://127.0.0.1:7897
 
   # 自定义 Investing 抓取节流
-  python unified_monitor.py --inv-delay 1.5 --inv-max-pages 5
+  python unified_monitor.py --inv-delay 1.5 --inv-max-pages 5 --inv-workers 2
 
   # 禁用某个监控源
   python unified_monitor.py --disable-lz --disable-wsj
@@ -133,6 +133,12 @@ def parse_args():
         help="Investing.com 单轮最大翻页数",
     )
     parser.add_argument(
+        "--inv-workers",
+        type=int,
+        default=3,
+        help="Investing.com 单轮最大并发数",
+    )
+    parser.add_argument(
         "--disable-inv",
         action="store_true",
         help="禁用 Investing.com 监控",
@@ -142,8 +148,8 @@ def parse_args():
     parser.add_argument(
         "--refresh-rate",
         type=float,
-        default=0.2,
-        help="UI 刷新间隔（秒），默认 0.2 秒（5 FPS）",
+        default=0.5,
+        help="UI 刷新间隔（秒），默认 0.5 秒（2 FPS）",
     )
 
     return parser.parse_args()
@@ -192,6 +198,7 @@ def main():
             proxy=args.inv_proxy,
             delay=args.inv_delay,
             max_pages=args.inv_max_pages,
+            workers=args.inv_workers,
         )
         manager.register(inv_adapter)
         enabled_count += 1

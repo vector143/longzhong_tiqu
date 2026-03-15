@@ -19,3 +19,4 @@
 - [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py#L136) 这类固定 Rich Layout 的详情面板会静默裁掉底部行；基础状态行必须尽量压缩，否则 `delay/max_pages` 这类关键运行参数虽然进了 `state.extra`，仍然不会稳定显示。
 - 多频道常驻源不能把 `run_now` 建在共享单消费者 event 上；像 [monitor/adapters.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapters.py) 里的 WSJ 这类“一频道一线程”模型，`run_now` 必须改成广播代次或每 worker 独立信号，否则统一控制台的“立即运行当前源”只会提前唤醒一个频道。
 - 统一控制台如果要可靠支持 per-source restart，生命周期字段不能散落在各 adapter 的 `extra` 拼装里；像 [monitor/adapter.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapter.py) 这类基类必须统一持有 `runtime_mode/runtime_status/runtime_worker_count/runtime_restarts` 与 start/stop hooks，adapter 只负责补自己的 reset/worker 同步逻辑。
+- 统一入口的性能参数必须打通到底层真实执行点：像 `InvestingAdapter` 里 `delay/workers` 不能只停留在 UI 或上层方法参数，必须注入 [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py) 的 `rate_limit/max_workers`，否则“已配置限速/并发”只是表象。

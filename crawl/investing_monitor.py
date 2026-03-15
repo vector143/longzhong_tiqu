@@ -487,7 +487,11 @@ class InvestingMonitor:
         print("=" * 80)
         print(f"📺 频道: {', '.join(channels)}")
         print(f"📄 检查页数: 最多 {max_pages} 页（遇到旧文章自动停止）")
-        print(f"🚀 并发数: {self.max_workers}")
+        if not channels:
+            print("⚠️ 未提供频道，跳过本轮")
+            return {}
+        channel_workers = max(1, min(len(channels), self.max_workers))
+        print(f"🚀 并发数: 频道并发 {channel_workers}（上限 {self.max_workers}）")
         print(f"⏱️  限速: {self.rate_limiter.min_interval} 秒/请求")
         if self.proxy:
             print(f"🌐 代理: {self.proxy}")
@@ -498,7 +502,7 @@ class InvestingMonitor:
         stats = {}
 
         # 并发处理多个频道
-        with ThreadPoolExecutor(max_workers=len(channels)) as executor:
+        with ThreadPoolExecutor(max_workers=channel_workers) as executor:
             futures = {
                 executor.submit(
                     self._crawl_channel_incremental, channel, max_pages

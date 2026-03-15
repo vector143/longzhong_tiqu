@@ -78,3 +78,45 @@ def test_main_passes_max_pages_to_monitor_loop(monkeypatch) -> None:
     module.main()
 
     assert captured["monitor_loop"]["max_pages"] == 1
+
+
+def test_crawl_incremental_caps_channel_workers_by_max_workers(monkeypatch) -> None:
+    captured: Dict[str, Any] = {}
+
+    class _DummyFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+    class _DummyExecutor:
+        def __init__(self, max_workers: int):
+            captured["executor_max_workers"] = max_workers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            return _DummyFuture(fn(*args, **kwargs))
+
+    monitor = module.InvestingMonitor(max_workers=2, rate_limit=1.0)
+
+    monkeypatch.setattr(
+        monitor,
+        "_crawl_channel_incremental",
+        lambda channel, max_pages: (channel, max_pages),
+    )
+    monkeypatch.setattr(monitor, "_save_seen_digests", lambda: None)
+    monkeypatch.setattr(module, "ThreadPoolExecutor", _DummyExecutor)
+    monkeypatch.setattr(module, "as_completed", lambda futures: futures)
+
+    channels = ["commodities", "economic-indicators", "economy"]
+    stats = monitor.crawl_incremental(channels=channels, max_pages=1)
+
+    assert captured["executor_max_workers"] == 2
+    assert stats == {channel: 1 for channel in channels}

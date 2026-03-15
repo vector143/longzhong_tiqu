@@ -433,6 +433,7 @@ class InvestingAdapter(MonitorAdapter):
         output_dir: str = None,
         delay: float = 3.0,
         max_pages: int = 3,
+        workers: int = 3,
     ):
         super().__init__(name="Investing.com")
         self.channels = channels
@@ -441,7 +442,13 @@ class InvestingAdapter(MonitorAdapter):
         self.output_dir = output_dir
         self.delay = delay
         self.max_pages = max_pages
-        self._monitor = InvestingMonitor(output_dir=output_dir, proxy=proxy)
+        self.workers = workers
+        self._monitor = InvestingMonitor(
+            output_dir=output_dir,
+            proxy=proxy,
+            max_workers=workers,
+            rate_limit=delay,
+        )
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "seconds"
@@ -449,6 +456,7 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["output_dir"] = output_dir
         self._state.extra["delay"] = delay
         self._state.extra["max_pages"] = max_pages
+        self._state.extra["workers"] = workers
         self._state.extra["channel_stats"] = {}
         self._state.extra["active_channels"] = []
         self._state.extra["consecutive_failures"] = 0

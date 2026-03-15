@@ -128,6 +128,44 @@ def test_investing_adapter_marks_interval_unit_as_seconds() -> None:
     assert adapter.get_state().extra["interval_unit"] == "seconds"
 
 
+def test_investing_adapter_passes_workers_and_rate_limit_to_monitor_constructor(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class _DummyInvestingMonitor:
+        def __init__(
+            self,
+            output_dir=None,
+            proxy=None,
+            max_workers=5,
+            rate_limit=1.0,
+        ) -> None:
+            captured.update(
+                {
+                    "output_dir": output_dir,
+                    "proxy": proxy,
+                    "max_workers": max_workers,
+                    "rate_limit": rate_limit,
+                }
+            )
+
+    monkeypatch.setattr(module, "InvestingMonitor", _DummyInvestingMonitor)
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        proxy="http://127.0.0.1:7897",
+        delay=1.5,
+        max_pages=5,
+        workers=2,
+    )
+
+    assert captured["proxy"] == "http://127.0.0.1:7897"
+    assert captured["max_workers"] == 2
+    assert captured["rate_limit"] == 1.5
+    assert adapter.get_state().extra["workers"] == 2
+
+
 def test_investing_adapter_uses_configurable_delay_and_max_pages(monkeypatch) -> None:
     captured = {}
     adapter = module.InvestingAdapter(

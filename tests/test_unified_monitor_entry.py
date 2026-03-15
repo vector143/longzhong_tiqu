@@ -53,9 +53,12 @@ def test_main_passes_investing_runtime_args_from_unified_entry(monkeypatch) -> N
             "1.5",
             "--inv-max-pages",
             "5",
+            "--inv-workers",
+            "2",
         ],
     )
 
     assert module.main() == 0
     assert captured["delay"] == 1.5
     assert captured["max_pages"] == 5
+    assert captured["workers"] == 2
