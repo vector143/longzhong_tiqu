@@ -434,6 +434,8 @@ class InvestingAdapter(MonitorAdapter):
         delay: float = 3.0,
         max_pages: int = 3,
         workers: int = 3,
+        adaptive_interval: bool = False,
+        max_interval: int = 180,
     ):
         super().__init__(name="Investing.com")
         self.channels = channels
@@ -443,6 +445,8 @@ class InvestingAdapter(MonitorAdapter):
         self.delay = delay
         self.max_pages = max_pages
         self.workers = workers
+        self.adaptive_interval = adaptive_interval
+        self.max_interval = max(max_interval, interval)
         self._monitor = InvestingMonitor(
             output_dir=output_dir,
             proxy=proxy,
@@ -457,6 +461,11 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["delay"] = delay
         self._state.extra["max_pages"] = max_pages
         self._state.extra["workers"] = workers
+        self._state.extra["adaptive_interval"] = adaptive_interval
+        self._state.extra["adaptive_max_interval"] = self.max_interval
+        self._state.extra["max_interval"] = self.max_interval
+        self._state.extra["adaptive_idle_rounds"] = 0
+        self._state.extra["adaptive_next_interval"] = interval
         self._state.extra["channel_stats"] = {}
         self._state.extra["active_channels"] = []
         self._state.extra["consecutive_failures"] = 0
@@ -481,9 +490,32 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["consecutive_failures"] = 0
         self._state.extra["backoff_seconds"] = 0
         self._state.extra["recent_items"] = []
+        self._state.extra["adaptive_idle_rounds"] = 0
+        self._state.extra["adaptive_next_interval"] = self.interval
 
     def _sync_runtime_metadata(self) -> None:
         self._state.extra["runtime_active_workers"] = 1 if self.is_running() else 0
+
+    def _compute_next_wait_seconds(self, total_new: int) -> int:
+        if not self.adaptive_interval:
+            self._state.extra["adaptive_idle_rounds"] = 0
+            self._state.extra["adaptive_next_interval"] = self.interval
+            return self.interval
+
+        idle_rounds = int(self._state.extra.get("adaptive_idle_rounds", 0))
+        if total_new > 0:
+            idle_rounds = 0
+            next_interval = self.interval
+        else:
+            idle_rounds += 1
+            next_interval = min(
+                self.max_interval,
+                max(self.interval, self.interval * (2**idle_rounds)),
+            )
+
+        self._state.extra["adaptive_idle_rounds"] = idle_rounds
+        self._state.extra["adaptive_next_interval"] = int(next_interval)
+        return int(next_interval)
 
     def _record_poll_result(
         self,
@@ -493,8 +525,16 @@ class InvestingAdapter(MonitorAdapter):
         stats: Optional[dict] = None,
         error: Optional[Exception] = None,
         backoff_seconds: int = 0,
+        wait_seconds: Optional[int] = None,
     ) -> None:
         """记录 Investing 单轮轮询结果。"""
+        if backoff_seconds > 0:
+            next_wait_seconds = backoff_seconds
+        elif wait_seconds is not None:
+            next_wait_seconds = wait_seconds
+        else:
+            next_wait_seconds = self.interval
+
         duration = max((finished_at - started_at).total_seconds(), 0.0)
         self._state.last_run = finished_at
         self._state.extra["round"] = round_num
@@ -502,7 +542,7 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["last_poll_finished_at"] = finished_at
         self._state.extra["last_round_duration_seconds"] = duration
         self._state.extra["next_run_at"] = finished_at + timedelta(
-            seconds=backoff_seconds or self.interval
+            seconds=next_wait_seconds
         )
         self._state.extra["backoff_seconds"] = backoff_seconds
 
@@ -537,6 +577,8 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["channel_stats"] = {}
         self._state.extra["active_channels"] = []
         self._state.extra["recent_items"] = []
+        self._state.extra["adaptive_idle_rounds"] = 0
+        self._state.extra["adaptive_next_interval"] = self.interval
         self._state.extra["consecutive_failures"] = (
             int(self._state.extra.get("consecutive_failures", 0)) + 1
         )
@@ -559,17 +601,20 @@ class InvestingAdapter(MonitorAdapter):
                     max_pages=self.max_pages,
                 )
                 finished_at = datetime.now()
+                total_new = sum(dict(stats or {}).values())
+                next_wait_seconds = self._compute_next_wait_seconds(total_new)
                 self._record_poll_result(
                     started_at=started_at,
                     finished_at=finished_at,
                     round_num=round_num,
                     stats=stats,
+                    wait_seconds=next_wait_seconds,
                 )
 
                 round_num += 1
 
                 # 等待下一轮，支持中断
-                if not self.wait_interval(self.interval):
+                if not self.wait_interval(next_wait_seconds):
                     break
 
             except Exception as e:

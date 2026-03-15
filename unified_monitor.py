@@ -44,6 +44,9 @@ def parse_args():
   # 自定义 Investing 抓取节流
   python unified_monitor.py --inv-delay 1.5 --inv-max-pages 5 --inv-workers 2
 
+  # 开启 Investing 自适应轮询（空轮询自动降频）
+  python unified_monitor.py --inv-adaptive --inv-max-interval 180
+
   # 禁用某个监控源
   python unified_monitor.py --disable-lz --disable-wsj
 
@@ -139,6 +142,17 @@ def parse_args():
         help="Investing.com 单轮最大并发数",
     )
     parser.add_argument(
+        "--inv-adaptive",
+        action="store_true",
+        help="开启 Investing 自适应轮询（空轮询自动拉长间隔）",
+    )
+    parser.add_argument(
+        "--inv-max-interval",
+        type=int,
+        default=180,
+        help="Investing 自适应轮询最大间隔（秒）",
+    )
+    parser.add_argument(
         "--disable-inv",
         action="store_true",
         help="禁用 Investing.com 监控",
@@ -199,6 +213,8 @@ def main():
             delay=args.inv_delay,
             max_pages=args.inv_max_pages,
             workers=args.inv_workers,
+            adaptive_interval=args.inv_adaptive,
+            max_interval=args.inv_max_interval,
         )
         manager.register(inv_adapter)
         enabled_count += 1

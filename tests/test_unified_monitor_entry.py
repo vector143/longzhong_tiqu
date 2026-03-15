@@ -55,6 +55,9 @@ def test_main_passes_investing_runtime_args_from_unified_entry(monkeypatch) -> N
             "5",
             "--inv-workers",
             "2",
+            "--inv-adaptive",
+            "--inv-max-interval",
+            "180",
         ],
     )
 
@@ -62,3 +65,5 @@ def test_main_passes_investing_runtime_args_from_unified_entry(monkeypatch) -> N
     assert captured["delay"] == 1.5
     assert captured["max_pages"] == 5
     assert captured["workers"] == 2
+    assert captured["adaptive_interval"] is True
+    assert captured["max_interval"] == 180

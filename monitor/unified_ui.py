@@ -426,6 +426,16 @@ class UnifiedMonitorUI:
             runtime_parts.append(f"延迟 {self._format_seconds(extra['delay'])}")
         if "max_pages" in extra:
             runtime_parts.append(f"翻页 {extra['max_pages']}")
+        if extra.get("adaptive_interval"):
+            runtime_parts.append("自适应轮询")
+            if "adaptive_next_interval" in extra:
+                runtime_parts.append(
+                    f"下轮 {self._format_seconds(extra['adaptive_next_interval'])}"
+                )
+            if "max_interval" in extra:
+                runtime_parts.append(
+                    f"上限 {self._format_seconds(extra['max_interval'])}"
+                )
         if runtime_parts:
             yield "运行参数", " | ".join(runtime_parts)
 

@@ -258,6 +258,107 @@ def test_investing_adapter_tracks_standard_runtime_state_on_success(
     assert state.extra["backoff_seconds"] == 0
 
 
+def test_investing_adapter_uses_adaptive_interval_when_idle(monkeypatch) -> None:
+    started_at = datetime(2026, 3, 16, 9, 30, 0)
+    finished_at = datetime(2026, 3, 16, 9, 30, 2)
+    wait_calls = []
+
+    class _FakeDatetime:
+        values = [started_at, finished_at]
+
+        @classmethod
+        def now(cls):
+            if cls.values:
+                return cls.values.pop(0)
+            return finished_at
+
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+        adaptive_interval=True,
+        max_interval=120,
+    )
+
+    monkeypatch.setattr(module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        adapter,
+        "wait_interval",
+        lambda seconds, poll_interval=0.2: wait_calls.append(seconds) or False,
+    )
+    monkeypatch.setattr(
+        adapter._monitor,
+        "crawl_incremental",
+        lambda channels, delay, max_pages: {"economy": 0},
+    )
+
+    adapter._run()
+
+    state = adapter.get_state()
+    assert wait_calls == [60]
+    assert state.extra["adaptive_interval"] is True
+    assert state.extra["adaptive_idle_rounds"] == 1
+    assert state.extra["adaptive_next_interval"] == 60
+    assert state.extra["next_run_at"] == finished_at + timedelta(seconds=60)
+
+
+def test_investing_adapter_resets_adaptive_interval_after_new_items(
+    monkeypatch,
+) -> None:
+    first_started_at = datetime(2026, 3, 16, 9, 30, 0)
+    first_finished_at = datetime(2026, 3, 16, 9, 30, 2)
+    second_started_at = datetime(2026, 3, 16, 9, 31, 2)
+    second_finished_at = datetime(2026, 3, 16, 9, 31, 4)
+    wait_calls = []
+    wait_results = iter([True, False])
+    stats_results = iter([{"economy": 0}, {"economy": 2}])
+
+    class _FakeDatetime:
+        values = [
+            first_started_at,
+            first_finished_at,
+            second_started_at,
+            second_finished_at,
+        ]
+
+        @classmethod
+        def now(cls):
+            if cls.values:
+                return cls.values.pop(0)
+            return second_finished_at
+
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+        adaptive_interval=True,
+        max_interval=120,
+    )
+
+    monkeypatch.setattr(module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        adapter,
+        "wait_interval",
+        lambda seconds, poll_interval=0.2: wait_calls.append(seconds)
+        or next(wait_results),
+    )
+    monkeypatch.setattr(
+        adapter._monitor,
+        "crawl_incremental",
+        lambda channels, delay, max_pages: next(stats_results),
+    )
+
+    adapter._run()
+
+    state = adapter.get_state()
+    assert wait_calls == [60, 30]
+    assert state.extra["adaptive_idle_rounds"] == 0
+    assert state.extra["adaptive_next_interval"] == 30
+    assert state.extra["next_run_at"] == second_finished_at + timedelta(seconds=30)
+
+
 def test_investing_adapter_tracks_backoff_state_on_failure(monkeypatch) -> None:
     failed_at = datetime(2026, 3, 15, 9, 30, 5)
 
