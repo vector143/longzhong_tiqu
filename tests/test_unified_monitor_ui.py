@@ -226,3 +226,45 @@ def test_unified_ui_renders_runtime_control_summary() -> None:
     assert "starting" in rendered
     assert "1/1" in rendered
     assert "重启 2" in rendered
+
+
+def test_unified_ui_renders_download_stats_panel_with_per_source_counts() -> None:
+    manager = MonitorManager()
+    manager.register(
+        _DummyAdapter(
+            "隆众资讯",
+            status=MonitorStatus.RUNNING,
+            items_count=1,
+            total_items=10,
+        )
+    )
+    manager.register(
+        _DummyAdapter(
+            "华尔街见闻",
+            status=MonitorStatus.RUNNING,
+            items_count=2,
+            total_items=20,
+        )
+    )
+    manager.register(
+        _DummyAdapter(
+            "Investing.com",
+            status=MonitorStatus.RUNNING,
+            items_count=3,
+            total_items=30,
+        )
+    )
+
+    console = Console(record=True, width=120)
+    ui = UnifiedMonitorUI(manager, refresh_rate=0.2, console=console)
+
+    console.print(ui._create_layout())
+    rendered = console.export_text()
+
+    assert "下载统计" in rendered
+    assert "隆众资讯" in rendered
+    assert "华尔街见闻" in rendered
+    assert "Investing.com" in rendered
+    assert "10" in rendered
+    assert "20" in rendered
+    assert "30" in rendered

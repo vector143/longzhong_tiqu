@@ -133,6 +133,33 @@ class UnifiedMonitorUI:
 
         return Panel(table, title="源列表", border_style="cyan")
 
+    def _create_download_stats(self) -> Panel:
+        states = self.manager.get_all_states()
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("来源", width=14, no_wrap=True, overflow="ellipsis")
+        table.add_column("本轮", justify="right", width=4)
+        table.add_column("累计", justify="right", width=6)
+        table.add_column("占比", justify="right", width=6)
+
+        total_downloaded = sum(state.total_items for state in states.values())
+        if not states:
+            table.add_row("暂无监控源", "-", "-", "-")
+        else:
+            for name, state in states.items():
+                ratio = (
+                    f"{(state.total_items / total_downloaded) * 100:.1f}%"
+                    if total_downloaded > 0
+                    else "0.0%"
+                )
+                table.add_row(
+                    name,
+                    str(state.items_count),
+                    str(state.total_items),
+                    ratio,
+                )
+
+        return Panel(table, title="下载统计", border_style="blue")
+
     def _create_selected_detail(self) -> Panel:
         selected_name = self.manager.get_selected_name()
         if selected_name is None:
@@ -219,13 +246,18 @@ class UnifiedMonitorUI:
             Layout(name="sources", size=42),
             Layout(name="details", ratio=1),
         )
+        layout["sources"].split_column(
+            Layout(name="source_list", ratio=3),
+            Layout(name="download_stats", ratio=2),
+        )
         layout["details"].split_column(
             Layout(name="selected", ratio=3),
             Layout(name="recent", ratio=2),
         )
 
         layout["header"].update(self._create_header())
-        layout["sources"].update(self._create_source_list())
+        layout["source_list"].update(self._create_source_list())
+        layout["download_stats"].update(self._create_download_stats())
         layout["selected"].update(self._create_selected_detail())
         layout["recent"].update(self._create_recent_items())
         layout["footer"].update(self._create_footer())
