@@ -120,6 +120,8 @@ def test_unified_ui_renders_summary_source_list_and_selected_details() -> None:
                 "interval": 30,
                 "interval_unit": "seconds",
                 "proxy": "http://127.0.0.1:7897",
+                "delay": 1.5,
+                "max_pages": 5,
                 "stats": {"commodities": 2, "economy": 0},
                 "recent_items": [
                     {"title": "库存下降", "time": "09:31:00"},
@@ -141,5 +143,7 @@ def test_unified_ui_renders_summary_source_list_and_selected_details() -> None:
     assert "当前选中" in rendered
     assert "Investing.com" in rendered
     assert "http://127.0.0.1:7897" in rendered
+    assert "1.5" in rendered
+    assert "5" in rendered
     assert "最近产出" in rendered
     assert "库存下降" in rendered

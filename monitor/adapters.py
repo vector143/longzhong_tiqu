@@ -37,6 +37,9 @@ class WallStreetCNAdapter(MonitorAdapter):
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "seconds"
+        self._state.extra["important_only"] = important_only
+        self._state.extra["output_dir"] = self.output_dir
+        self._state.extra["channel_stats"] = {}
 
     def _on_new_items(self, channel_name: str, items: list):
         """处理新快讯"""
@@ -45,6 +48,10 @@ class WallStreetCNAdapter(MonitorAdapter):
             self._state.total_items += len(items)
             self._state.last_run = datetime.now()
             self._state.extra["last_channel"] = channel_name
+            channel_stats = self._state.extra.setdefault("channel_stats", {})
+            channel_stats[channel_name] = channel_stats.get(channel_name, 0) + len(
+                items
+            )
             recent_items = [
                 {
                     "title": item.get("title", "")[:50],
@@ -156,17 +163,24 @@ class InvestingAdapter(MonitorAdapter):
         interval: int = 300,
         proxy: str = None,
         output_dir: str = None,
+        delay: float = 3.0,
+        max_pages: int = 3,
     ):
         super().__init__(name="Investing.com")
         self.channels = channels
         self.interval = interval
         self.proxy = proxy
         self.output_dir = output_dir
+        self.delay = delay
+        self.max_pages = max_pages
         self._monitor = InvestingMonitor(output_dir=output_dir, proxy=proxy)
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "seconds"
         self._state.extra["proxy"] = proxy
+        self._state.extra["output_dir"] = output_dir
+        self._state.extra["delay"] = delay
+        self._state.extra["max_pages"] = max_pages
 
     def _run(self):
         """运行监控"""
@@ -178,7 +192,9 @@ class InvestingAdapter(MonitorAdapter):
                     break
                 self._state.last_run = datetime.now()
                 stats = self._monitor.crawl_incremental(
-                    channels=self.channels, delay=3.0, max_pages=3
+                    channels=self.channels,
+                    delay=self.delay,
+                    max_pages=self.max_pages,
                 )
 
                 total_new = sum(stats.values())

@@ -145,11 +145,18 @@ class UnifiedMonitorUI:
 
         table.add_row("当前选中", selected_name)
         table.add_row("状态", self._status_text(state))
-        table.add_row("最后运行", self._format_datetime(state.last_run))
-        table.add_row("运行时长", self._format_running_time(state.running_time))
         table.add_row("轮询间隔", self._format_interval(state))
-        table.add_row("本轮采集", str(state.items_count))
-        table.add_row("累计采集", str(state.total_items))
+        table.add_row(
+            "运行概览",
+            (
+                f"最后运行 {self._format_datetime(state.last_run)} | "
+                f"运行时长 {self._format_running_time(state.running_time)}"
+            ),
+        )
+        table.add_row(
+            "采集统计",
+            f"本轮 {state.items_count} | 累计 {state.total_items}",
+        )
 
         for label, value in self._iter_detail_rows(state):
             table.add_row(label, value)
@@ -301,11 +308,26 @@ class UnifiedMonitorUI:
         extra = state.extra
         if "keywords" in extra and isinstance(extra["keywords"], list):
             yield "关键词", self._join_values(extra["keywords"])
+        if "important_only" in extra:
+            yield "仅重要快讯", "是" if extra["important_only"] else "否"
+        if "output_dir" in extra and extra["output_dir"]:
+            yield "输出目录", str(extra["output_dir"])
         if "proxy" in extra and extra["proxy"]:
             yield "代理", str(extra["proxy"])
+        if "delay" in extra:
+            yield "抓取延迟", str(extra["delay"])
+        if "max_pages" in extra:
+            yield "最大翻页", str(extra["max_pages"])
         if "current_keyword" in extra:
             yield "当前关键词", str(extra["current_keyword"])
         if "channels" in extra and isinstance(extra["channels"], list):
             yield "频道", self._join_values(extra["channels"])
         if "last_channel" in extra:
             yield "最后频道", str(extra["last_channel"])
+        if "channel_stats" in extra and isinstance(extra["channel_stats"], dict):
+            stats = [
+                f"{channel}:{count}"
+                for channel, count in extra["channel_stats"].items()
+            ]
+            if stats:
+                yield "频道统计", self._join_values(stats)

@@ -16,3 +16,4 @@
 - [monitor/adapters.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapters.py#L202) 里的 `LongZhongAdapter` 只能算临时适配，不应作为统一监控架构核心；正式统一入口必须复用 [monitor/runner.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/runner.py#L293) 的预检、PID、共享请求闸门和清理链路。
 - 统一监控界面不能只传裸 `interval` 数字；像 [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py#L266) 这类统一详情面板必须配合 `interval_unit` 元数据，否则隆众分钟轮询和其它秒级轮询会被错误渲染成同一语义。
 - 如果要把隆众嵌入统一控制台，优先从 [monitor/runner.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/runner.py) 抽 `build/start/stop runtime` 这种资源层，再让 [monitor/adapters.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/adapters.py#L202) 去复用；不要直接在 adapter 里复制 `run_monitor()` 的 CLI/UI/信号处理逻辑。
+- [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py#L136) 这类固定 Rich Layout 的详情面板会静默裁掉底部行；基础状态行必须尽量压缩，否则 `delay/max_pages` 这类关键运行参数虽然进了 `state.extra`，仍然不会稳定显示。

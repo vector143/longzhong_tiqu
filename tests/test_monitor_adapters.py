@@ -19,10 +19,61 @@ def test_wallstreetcn_adapter_uses_runtime_project_relative_output_dir() -> None
     assert Path(adapter.output_dir) == expected_dir
 
 
+def test_wallstreetcn_adapter_exposes_detail_metadata() -> None:
+    adapter = module.WallStreetCNAdapter(
+        channels=["oil-channel", "gold-channel"],
+        important_only=True,
+    )
+
+    state = adapter.get_state()
+    assert state.extra["important_only"] is True
+    assert state.extra["output_dir"] == adapter.output_dir
+    assert state.extra["channel_stats"] == {}
+
+
 def test_investing_adapter_marks_interval_unit_as_seconds() -> None:
     adapter = module.InvestingAdapter(channels=["economy"], interval=30)
 
     assert adapter.get_state().extra["interval_unit"] == "seconds"
+
+
+def test_investing_adapter_uses_configurable_delay_and_max_pages(monkeypatch) -> None:
+    captured = {}
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+    )
+
+    monkeypatch.setattr(
+        adapter,
+        "wait_interval",
+        lambda _seconds, poll_interval=0.2: False,
+    )
+    monkeypatch.setattr(
+        adapter._monitor,
+        "crawl_incremental",
+        lambda channels, delay, max_pages: captured.update(
+            {
+                "channels": channels,
+                "delay": delay,
+                "max_pages": max_pages,
+            }
+        )
+        or {"economy": 2},
+    )
+
+    adapter._run()
+
+    assert captured == {
+        "channels": ["economy"],
+        "delay": 1.5,
+        "max_pages": 5,
+    }
+    state = adapter.get_state()
+    assert state.extra["delay"] == 1.5
+    assert state.extra["max_pages"] == 5
 
 
 def test_longzhong_adapter_marks_interval_unit_as_minutes() -> None:
