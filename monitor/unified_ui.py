@@ -331,8 +331,34 @@ class UnifiedMonitorUI:
         pairs = [f"{channel}:{count}" for channel, count in stats.items()]
         return self._join_values(pairs, limit=3)
 
+    def _build_runtime_control_summary(self, state: MonitorState) -> Optional[str]:
+        extra = state.extra
+        runtime_mode = extra.get("runtime_mode")
+        runtime_status = extra.get("runtime_status")
+        worker_count = extra.get("runtime_worker_count")
+        active_workers = extra.get("runtime_active_workers")
+
+        if runtime_mode is None and runtime_status is None:
+            return None
+
+        parts = []
+        if runtime_mode is not None:
+            parts.append(str(runtime_mode))
+        if runtime_status is not None:
+            parts.append(str(runtime_status))
+        if worker_count is not None:
+            active = 0 if active_workers is None else active_workers
+            parts.append(f"worker {active}/{worker_count}")
+        if int(extra.get("runtime_restarts", 0)) > 0:
+            parts.append(f"重启 {extra['runtime_restarts']}")
+        return " | ".join(parts)
+
     def _iter_detail_rows(self, state: MonitorState):
         extra = state.extra
+        runtime_summary = self._build_runtime_control_summary(state)
+        if runtime_summary:
+            yield "运行控制", runtime_summary
+
         schedule_parts = []
         next_run_at = extra.get("next_run_at") or extra.get("next_poll_time")
         if next_run_at is not None:

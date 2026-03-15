@@ -38,20 +38,12 @@ class WallStreetCNAdapter(MonitorAdapter):
         self._state_lock = threading.Lock()
         self._run_now_generation = 0
         self._channel_states = {
-            channel: {
-                "status": "idle",
-                "next_run_at": None,
-                "last_success_at": None,
-                "last_poll_started_at": None,
-                "last_poll_finished_at": None,
-                "last_round_duration_seconds": 0.0,
-                "last_round_new": 0,
-                "consecutive_failures": 0,
-                "backoff_seconds": 0,
-                "last_error": None,
-            }
-            for channel in channels
+            channel: self._build_channel_state() for channel in channels
         }
+        self._configure_runtime_metadata(
+            mode="multi-thread",
+            worker_count=len(channels),
+        )
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "seconds"
@@ -64,6 +56,63 @@ class WallStreetCNAdapter(MonitorAdapter):
         self._state.extra["failed_channels"] = []
         self._state.extra["consecutive_failures"] = 0
         self._state.extra["backoff_seconds"] = 0
+
+    @staticmethod
+    def _build_channel_state() -> dict:
+        return {
+            "status": "idle",
+            "next_run_at": None,
+            "last_success_at": None,
+            "last_poll_started_at": None,
+            "last_poll_finished_at": None,
+            "last_round_duration_seconds": 0.0,
+            "last_round_new": 0,
+            "consecutive_failures": 0,
+            "backoff_seconds": 0,
+            "last_error": None,
+        }
+
+    def _before_start(self) -> None:
+        with self._state_lock:
+            self._monitors = []
+            self._run_now_generation = 0
+            self._channel_states = {
+                channel: self._build_channel_state() for channel in self.channels
+            }
+            self._state.items_count = 0
+            self._state.last_error = None
+            self._state.extra["failed_channels"] = []
+            self._state.extra["consecutive_failures"] = 0
+            self._state.extra["backoff_seconds"] = 0
+            self._state.extra["next_run_at"] = None
+            self._state.extra["last_success_at"] = None
+            self._state.extra["last_poll_started_at"] = None
+            self._state.extra["last_poll_finished_at"] = None
+            self._state.extra["last_round_duration_seconds"] = 0.0
+            self._state.extra["last_round_new"] = 0
+            self._state.extra["channel_statuses"] = {
+                channel: "idle" for channel in self.channels
+            }
+            self._state.extra["recent_items"] = []
+            self._state.extra["last_items"] = []
+
+    def _after_stop(self) -> None:
+        with self._state_lock:
+            for channel_state in self._channel_states.values():
+                channel_state["status"] = "stopped"
+                channel_state["next_run_at"] = None
+            self._sync_channel_aggregate_state()
+
+    def _sync_runtime_metadata(self) -> None:
+        with self._state_lock:
+            active_workers = sum(
+                1
+                for data in self._channel_states.values()
+                if data.get("status") not in {"idle", "stopped"}
+            )
+            if self.is_running() and active_workers == 0:
+                active_workers = len(self.channels)
+            self._state.extra["runtime_active_workers"] = active_workers
 
     def _consume_run_now_broadcast(self, last_seen_generation: int) -> Optional[int]:
         """返回尚未消费的 run-now 广播代次。"""
@@ -159,18 +208,7 @@ class WallStreetCNAdapter(MonitorAdapter):
         with self._state_lock:
             channel_state = self._channel_states.setdefault(
                 channel,
-                {
-                    "status": "idle",
-                    "next_run_at": None,
-                    "last_success_at": None,
-                    "last_poll_started_at": None,
-                    "last_poll_finished_at": None,
-                    "last_round_duration_seconds": 0.0,
-                    "last_round_new": 0,
-                    "consecutive_failures": 0,
-                    "backoff_seconds": 0,
-                    "last_error": None,
-                },
+                self._build_channel_state(),
             )
             channel_state["last_poll_started_at"] = started_at
             channel_state["last_poll_finished_at"] = finished_at
@@ -415,6 +453,29 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["active_channels"] = []
         self._state.extra["consecutive_failures"] = 0
         self._state.extra["backoff_seconds"] = 0
+        self._configure_runtime_metadata(
+            mode="single-loop",
+            worker_count=1,
+        )
+
+    def _before_start(self) -> None:
+        self._state.items_count = 0
+        self._state.last_error = None
+        self._state.extra["next_run_at"] = None
+        self._state.extra["last_success_at"] = None
+        self._state.extra["last_poll_started_at"] = None
+        self._state.extra["last_poll_finished_at"] = None
+        self._state.extra["last_round_duration_seconds"] = 0.0
+        self._state.extra["last_round_new"] = 0
+        self._state.extra["channel_stats"] = {}
+        self._state.extra["stats"] = {}
+        self._state.extra["active_channels"] = []
+        self._state.extra["consecutive_failures"] = 0
+        self._state.extra["backoff_seconds"] = 0
+        self._state.extra["recent_items"] = []
+
+    def _sync_runtime_metadata(self) -> None:
+        self._state.extra["runtime_active_workers"] = 1 if self.is_running() else 0
 
     def _record_poll_result(
         self,
@@ -531,6 +592,11 @@ class LongZhongAdapter(MonitorAdapter):
         self.interval = interval
         self.no_history = no_history
         self._runtime = None
+        self._configure_runtime_metadata(
+            mode="embedded-runtime",
+            worker_count=len(keywords),
+            controller_ready=False,
+        )
         self._state.extra["keywords"] = keywords
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "minutes"
@@ -541,6 +607,14 @@ class LongZhongAdapter(MonitorAdapter):
         if self._runtime is None:
             return None
         return getattr(self._runtime, "controller", None)
+
+    def _sync_runtime_metadata(self) -> None:
+        controller = self._runtime_controller()
+        self._state.extra["runtime_controller_ready"] = controller is not None
+        if self._runtime is None:
+            self._state.extra["runtime_active_workers"] = 0
+        else:
+            self._state.extra["runtime_active_workers"] = len(self.keywords)
 
     def _sync_runtime_state(self) -> None:
         """将正式 runtime 的状态快照映射到统一控制台状态。"""

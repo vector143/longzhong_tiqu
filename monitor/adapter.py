@@ -48,11 +48,85 @@ class MonitorAdapter(ABC):
         self._thread: Optional[Thread] = None
         self._state = MonitorState(name=name)
         self._start_time: Optional[datetime] = None
+        self._runtime_start_count = 0
+        self._configure_runtime_metadata()
 
     @abstractmethod
     def _run(self):
         """监控主循环（子类实现）"""
         pass
+
+    def _configure_runtime_metadata(
+        self,
+        *,
+        mode: str = "threaded",
+        worker_count: int = 1,
+        controller_ready: bool = True,
+    ) -> None:
+        """初始化统一 runtime 元数据。"""
+        self._state.extra["runtime_mode"] = mode
+        self._state.extra["runtime_status"] = self._state.extra.get(
+            "runtime_status",
+            "idle",
+        )
+        self._state.extra["runtime_worker_count"] = worker_count
+        self._state.extra["runtime_active_workers"] = self._state.extra.get(
+            "runtime_active_workers",
+            0,
+        )
+        self._state.extra["runtime_restarts"] = self._state.extra.get(
+            "runtime_restarts",
+            0,
+        )
+        self._state.extra["runtime_controller_ready"] = controller_ready
+        self._state.extra["runtime_last_started_at"] = self._state.extra.get(
+            "runtime_last_started_at"
+        )
+        self._state.extra["runtime_last_stopped_at"] = self._state.extra.get(
+            "runtime_last_stopped_at"
+        )
+
+    def _runtime_default_active_workers(self) -> int:
+        """返回启动时默认的活跃 worker 数。"""
+        return int(self._state.extra.get("runtime_worker_count", 1))
+
+    def _before_start(self) -> None:
+        """启动前 hook，子类可重置自身 runtime 状态。"""
+
+    def _after_stop(self) -> None:
+        """停止后 hook，子类可收尾 runtime 状态。"""
+
+    def _sync_runtime_metadata(self) -> None:
+        """获取状态前同步 runtime 元数据。"""
+
+    def _mark_runtime_starting(self) -> None:
+        """标记 runtime 已进入启动阶段。"""
+        if self._runtime_start_count > 0:
+            self._state.extra["runtime_restarts"] = self._runtime_start_count
+        self._runtime_start_count += 1
+        self._state.extra["runtime_status"] = "starting"
+        self._state.extra["runtime_active_workers"] = (
+            self._runtime_default_active_workers()
+        )
+        self._state.extra["runtime_controller_ready"] = True
+        self._state.extra["runtime_last_started_at"] = datetime.now()
+
+    def _mark_runtime_running(self) -> None:
+        """标记 runtime 已进入运行阶段。"""
+        self._state.extra["runtime_status"] = "running"
+        self._state.extra["runtime_active_workers"] = (
+            self._runtime_default_active_workers()
+        )
+
+    def _mark_runtime_stopped(self) -> None:
+        """标记 runtime 已停止。"""
+        self._state.extra["runtime_status"] = "stopped"
+        self._state.extra["runtime_active_workers"] = 0
+        self._state.extra["runtime_last_stopped_at"] = datetime.now()
+
+    def _mark_runtime_error(self) -> None:
+        """标记 runtime 进入错误态。"""
+        self._state.extra["runtime_status"] = "error"
 
     def start(self):
         """启动监控"""
@@ -62,18 +136,22 @@ class MonitorAdapter(ABC):
         self._stop_event.clear()
         self._pause_event.clear()
         self._run_now_event.clear()
+        self._before_start()
         self._start_time = datetime.now()
         self._state.status = MonitorStatus.RUNNING
+        self._mark_runtime_starting()
         self._thread = Thread(target=self._run_wrapper, daemon=True)
         self._thread.start()
 
     def _run_wrapper(self):
         """运行包装器，处理异常"""
         try:
+            self._mark_runtime_running()
             self._run()
         except Exception as e:
             self._state.status = MonitorStatus.ERROR
             self._state.last_error = str(e)
+            self._mark_runtime_error()
 
     def stop(self, timeout: float = 10.0):
         """停止监控"""
@@ -82,6 +160,8 @@ class MonitorAdapter(ABC):
         self._run_now_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
+        self._after_stop()
+        self._mark_runtime_stopped()
         self._state.status = MonitorStatus.STOPPED
 
     def is_running(self) -> bool:
@@ -90,6 +170,7 @@ class MonitorAdapter(ABC):
 
     def get_state(self) -> MonitorState:
         """获取当前状态"""
+        self._sync_runtime_metadata()
         if self._start_time and self._state.status == MonitorStatus.RUNNING:
             self._state.running_time = (
                 datetime.now() - self._start_time
@@ -104,6 +185,7 @@ class MonitorAdapter(ABC):
         """暂停监控轮询"""
         if self._state.status == MonitorStatus.RUNNING:
             self._state.status = MonitorStatus.PAUSED
+        self._state.extra["runtime_status"] = "paused"
         self._pause_event.set()
 
     def resume(self):
@@ -111,6 +193,8 @@ class MonitorAdapter(ABC):
         self._pause_event.clear()
         if self.is_running() and self._state.status == MonitorStatus.PAUSED:
             self._state.status = MonitorStatus.RUNNING
+        if self.is_running():
+            self._state.extra["runtime_status"] = "running"
 
     def run_now(self):
         """触发下一轮立即执行"""

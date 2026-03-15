@@ -6,8 +6,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from monitor import adapter as adapter_module
 from monitor import adapters as module
 from monitor.adapter import MonitorStatus
+
+
+class _FakeThread:
+    def __init__(self, target=None, daemon=None):
+        self.target = target
+        self.daemon = daemon
+        self._alive = False
+
+    def start(self) -> None:
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout=None) -> None:
+        del timeout
+        self._alive = False
 
 
 def test_wallstreetcn_adapter_uses_runtime_project_relative_output_dir() -> None:
@@ -73,6 +91,35 @@ def test_wallstreetcn_adapter_run_now_broadcasts_to_all_channels() -> None:
     assert adapter._consume_run_now_broadcast(0) == 1
     assert adapter._consume_run_now_broadcast(0) == 1
     assert adapter._consume_run_now_broadcast(1) is None
+
+
+def test_wallstreetcn_adapter_tracks_runtime_lifecycle_on_start_and_stop(
+    monkeypatch,
+) -> None:
+    adapter = module.WallStreetCNAdapter(
+        channels=["oil-channel", "gold-channel"],
+        interval=30,
+    )
+
+    monkeypatch.setattr(adapter_module, "Thread", _FakeThread)
+
+    adapter.start()
+    running_state = adapter.get_state()
+
+    assert running_state.extra["runtime_mode"] == "multi-thread"
+    assert running_state.extra["runtime_status"] == "starting"
+    assert running_state.extra["runtime_worker_count"] == 2
+    assert running_state.extra["runtime_active_workers"] == 2
+    assert running_state.extra["runtime_restarts"] == 0
+    assert running_state.extra["runtime_controller_ready"] is True
+
+    adapter.stop()
+    stopped_state = adapter.get_state()
+
+    assert stopped_state.status == MonitorStatus.STOPPED
+    assert stopped_state.extra["runtime_status"] == "stopped"
+    assert stopped_state.extra["runtime_active_workers"] == 0
+    assert stopped_state.extra["runtime_last_stopped_at"] is not None
 
 
 def test_investing_adapter_marks_interval_unit_as_seconds() -> None:
@@ -215,6 +262,46 @@ def test_investing_adapter_tracks_backoff_state_on_failure(monkeypatch) -> None:
     assert state.extra["next_run_at"] == failed_at + timedelta(seconds=10)
     assert state.extra["consecutive_failures"] == 1
     assert state.extra["backoff_seconds"] == 10
+
+
+def test_investing_adapter_restart_resets_runtime_and_failure_state(
+    monkeypatch,
+) -> None:
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+    )
+
+    adapter._state.status = MonitorStatus.ERROR
+    adapter._state.last_error = "Investing: boom"
+    adapter._state.extra["next_run_at"] = datetime(2026, 3, 15, 9, 40, 0)
+    adapter._state.extra["consecutive_failures"] = 3
+    adapter._state.extra["backoff_seconds"] = 10
+    adapter._state.extra["channel_stats"] = {"economy": 2}
+    adapter._state.extra["recent_items"] = [{"time": "09:39:00", "title": "旧数据"}]
+
+    monkeypatch.setattr(adapter_module, "Thread", _FakeThread)
+
+    adapter.start()
+    first_start = adapter.get_state()
+    assert first_start.extra["runtime_mode"] == "single-loop"
+    assert first_start.extra["runtime_status"] == "starting"
+    assert first_start.extra["runtime_restarts"] == 0
+    assert first_start.last_error is None
+    assert first_start.extra["next_run_at"] is None
+    assert first_start.extra["consecutive_failures"] == 0
+    assert first_start.extra["backoff_seconds"] == 0
+    assert first_start.extra["channel_stats"] == {}
+    assert first_start.extra["recent_items"] == []
+
+    adapter.stop()
+    adapter.start()
+    second_start = adapter.get_state()
+
+    assert second_start.extra["runtime_restarts"] == 1
+    assert second_start.extra["runtime_active_workers"] == 1
 
 
 def test_longzhong_adapter_marks_interval_unit_as_minutes() -> None:

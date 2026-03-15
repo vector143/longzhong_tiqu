@@ -191,3 +191,38 @@ def test_unified_ui_renders_schedule_backoff_and_channel_stats_summary() -> None
     assert "频道统计" in rendered
     assert "oil-channel:3" in rendered
     assert "gold-channel:1" in rendered
+
+
+def test_unified_ui_renders_runtime_control_summary() -> None:
+    manager = MonitorManager()
+    manager.register(
+        _DummyAdapter(
+            "Investing.com",
+            status=MonitorStatus.RUNNING,
+            items_count=0,
+            total_items=8,
+            extra={
+                "channels": ["commodities"],
+                "interval": 30,
+                "interval_unit": "seconds",
+                "runtime_mode": "single-loop",
+                "runtime_status": "starting",
+                "runtime_worker_count": 1,
+                "runtime_active_workers": 1,
+                "runtime_restarts": 2,
+                "runtime_controller_ready": True,
+            },
+        )
+    )
+
+    console = Console(record=True, width=120)
+    ui = UnifiedMonitorUI(manager, refresh_rate=0.2, console=console)
+
+    console.print(ui._create_layout())
+    rendered = console.export_text()
+
+    assert "运行控制" in rendered
+    assert "single-loop" in rendered
+    assert "starting" in rendered
+    assert "1/1" in rendered
+    assert "重启 2" in rendered
