@@ -147,3 +147,47 @@ def test_unified_ui_renders_summary_source_list_and_selected_details() -> None:
     assert "5" in rendered
     assert "最近产出" in rendered
     assert "库存下降" in rendered
+
+
+def test_unified_ui_renders_schedule_backoff_and_channel_stats_summary() -> None:
+    manager = MonitorManager()
+    manager.register(
+        _DummyAdapter(
+            "华尔街见闻",
+            status=MonitorStatus.ERROR,
+            items_count=1,
+            total_items=12,
+            extra={
+                "channels": ["oil-channel", "gold-channel"],
+                "interval": 30,
+                "interval_unit": "seconds",
+                "next_run_at": datetime(2026, 3, 15, 9, 31, 0),
+                "last_success_at": datetime(2026, 3, 15, 9, 28, 15),
+                "consecutive_failures": 2,
+                "backoff_seconds": 10,
+                "channel_stats": {
+                    "oil-channel": 3,
+                    "gold-channel": 1,
+                },
+                "recent_items": [
+                    {"title": "油价拉升", "time": "09:30:58"},
+                ],
+            },
+        )
+    )
+
+    console = Console(record=True, width=120)
+    ui = UnifiedMonitorUI(manager, refresh_rate=0.2, console=console)
+
+    console.print(ui._create_layout())
+    rendered = console.export_text()
+
+    assert "调度状态" in rendered
+    assert "09:31:00" in rendered
+    assert "09:28:15" in rendered
+    assert "失败退避" in rendered
+    assert "连续失败 2" in rendered
+    assert "退避 10s" in rendered
+    assert "频道统计" in rendered
+    assert "oil-channel:3" in rendered
+    assert "gold-channel:1" in rendered

@@ -174,13 +174,16 @@ class UnifiedMonitorUI:
 
         state = self.manager.get_selected_state()
         items = state.extra.get("recent_items") or state.extra.get("last_items") or []
-        stats = state.extra.get("stats")
+        stats = state.extra.get("channel_stats") or state.extra.get("stats")
 
         table = Table(box=box.SIMPLE_HEAVY, expand=True)
         table.add_column("时间", width=10, justify="center")
         table.add_column("内容", overflow="fold")
 
         if items:
+            summary = self._build_channel_stats_summary(state)
+            if summary:
+                table.add_row("频道统计", summary)
             for item in items[:8]:
                 table.add_row(str(item.get("time", "--")), str(item.get("title", "-")))
         elif isinstance(stats, dict) and stats:
@@ -263,6 +266,14 @@ class UnifiedMonitorUI:
             return "--:--:--"
         return value.strftime("%H:%M:%S")
 
+    @classmethod
+    def _format_extra_datetime(cls, value) -> str:
+        if isinstance(value, datetime):
+            return cls._format_datetime(value)
+        if value in (None, ""):
+            return "--:--:--"
+        return str(value)
+
     @staticmethod
     def _format_running_time(seconds: float) -> str:
         if seconds <= 0:
@@ -304,30 +315,67 @@ class UnifiedMonitorUI:
             return ", ".join(items)
         return ", ".join(items[:limit]) + "..."
 
+    @staticmethod
+    def _format_seconds(value) -> str:
+        if value in (None, ""):
+            return "0s"
+        number = float(value)
+        if number.is_integer():
+            return f"{int(number)}s"
+        return f"{number:.1f}s"
+
+    def _build_channel_stats_summary(self, state: MonitorState) -> Optional[str]:
+        stats = state.extra.get("channel_stats") or state.extra.get("stats")
+        if not isinstance(stats, dict) or not stats:
+            return None
+        pairs = [f"{channel}:{count}" for channel, count in stats.items()]
+        return self._join_values(pairs, limit=3)
+
     def _iter_detail_rows(self, state: MonitorState):
         extra = state.extra
+        schedule_parts = []
+        next_run_at = extra.get("next_run_at") or extra.get("next_poll_time")
+        if next_run_at is not None:
+            schedule_parts.append(f"下次 {self._format_extra_datetime(next_run_at)}")
+        if extra.get("last_success_at") is not None:
+            schedule_parts.append(
+                f"上次成功 {self._format_extra_datetime(extra['last_success_at'])}"
+            )
+        if schedule_parts:
+            yield "调度状态", " | ".join(schedule_parts)
+
+        failure_parts = []
+        if int(extra.get("consecutive_failures", 0)) > 0:
+            failure_parts.append(f"连续失败 {extra['consecutive_failures']}")
+        if float(extra.get("backoff_seconds", 0) or 0) > 0:
+            failure_parts.append(
+                f"退避 {self._format_seconds(extra['backoff_seconds'])}"
+            )
+        if failure_parts:
+            yield "失败退避", " | ".join(failure_parts)
+
         if "keywords" in extra and isinstance(extra["keywords"], list):
             yield "关键词", self._join_values(extra["keywords"])
+
+        runtime_parts = []
         if "important_only" in extra:
-            yield "仅重要快讯", "是" if extra["important_only"] else "否"
+            runtime_parts.append(
+                "仅重要快讯" if extra["important_only"] else "全部快讯"
+            )
+        if "proxy" in extra and extra["proxy"]:
+            runtime_parts.append(f"代理 {extra['proxy']}")
+        if "delay" in extra:
+            runtime_parts.append(f"延迟 {self._format_seconds(extra['delay'])}")
+        if "max_pages" in extra:
+            runtime_parts.append(f"翻页 {extra['max_pages']}")
+        if runtime_parts:
+            yield "运行参数", " | ".join(runtime_parts)
+
         if "output_dir" in extra and extra["output_dir"]:
             yield "输出目录", str(extra["output_dir"])
-        if "proxy" in extra and extra["proxy"]:
-            yield "代理", str(extra["proxy"])
-        if "delay" in extra:
-            yield "抓取延迟", str(extra["delay"])
-        if "max_pages" in extra:
-            yield "最大翻页", str(extra["max_pages"])
         if "current_keyword" in extra:
             yield "当前关键词", str(extra["current_keyword"])
         if "channels" in extra and isinstance(extra["channels"], list):
             yield "频道", self._join_values(extra["channels"])
         if "last_channel" in extra:
             yield "最后频道", str(extra["last_channel"])
-        if "channel_stats" in extra and isinstance(extra["channel_stats"], dict):
-            stats = [
-                f"{channel}:{count}"
-                for channel, count in extra["channel_stats"].items()
-            ]
-            if stats:
-                yield "频道统计", self._join_values(stats)

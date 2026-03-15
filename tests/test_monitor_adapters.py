@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,6 +29,50 @@ def test_wallstreetcn_adapter_exposes_detail_metadata() -> None:
     assert state.extra["important_only"] is True
     assert state.extra["output_dir"] == adapter.output_dir
     assert state.extra["channel_stats"] == {}
+
+
+def test_wallstreetcn_adapter_records_standard_runtime_state_for_channel_poll() -> None:
+    adapter = module.WallStreetCNAdapter(
+        channels=["oil-channel", "gold-channel"],
+        interval=30,
+    )
+    started_at = datetime(2026, 3, 15, 9, 30, 0)
+    finished_at = datetime(2026, 3, 15, 9, 30, 2)
+    next_run_at = datetime(2026, 3, 15, 9, 30, 32)
+
+    adapter._record_channel_poll_result(
+        channel="oil-channel",
+        started_at=started_at,
+        finished_at=finished_at,
+        new_count=2,
+        next_run_at=next_run_at,
+    )
+
+    state = adapter.get_state()
+    assert state.last_run == finished_at
+    assert state.extra["last_success_at"] == finished_at
+    assert state.extra["last_poll_started_at"] == started_at
+    assert state.extra["last_poll_finished_at"] == finished_at
+    assert state.extra["last_round_duration_seconds"] == 2.0
+    assert state.extra["last_round_new"] == 2
+    assert state.extra["next_run_at"] == next_run_at
+    assert state.extra["channel_statuses"]["oil-channel"] == "running"
+    assert state.extra["failed_channels"] == []
+
+
+def test_wallstreetcn_adapter_run_now_broadcasts_to_all_channels() -> None:
+    adapter = module.WallStreetCNAdapter(
+        channels=["oil-channel", "gold-channel"],
+        interval=30,
+    )
+
+    assert adapter._consume_run_now_broadcast(0) is None
+
+    adapter.run_now()
+
+    assert adapter._consume_run_now_broadcast(0) == 1
+    assert adapter._consume_run_now_broadcast(0) == 1
+    assert adapter._consume_run_now_broadcast(1) is None
 
 
 def test_investing_adapter_marks_interval_unit_as_seconds() -> None:
@@ -74,6 +118,103 @@ def test_investing_adapter_uses_configurable_delay_and_max_pages(monkeypatch) ->
     state = adapter.get_state()
     assert state.extra["delay"] == 1.5
     assert state.extra["max_pages"] == 5
+
+
+def test_investing_adapter_tracks_standard_runtime_state_on_success(
+    monkeypatch,
+) -> None:
+    started_at = datetime(2026, 3, 15, 9, 30, 0)
+    finished_at = datetime(2026, 3, 15, 9, 30, 2)
+
+    class _FakeDatetime:
+        values = [started_at, finished_at]
+
+        @classmethod
+        def now(cls):
+            if cls.values:
+                return cls.values.pop(0)
+            return finished_at
+
+    adapter = module.InvestingAdapter(
+        channels=["commodities", "economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+    )
+
+    monkeypatch.setattr(module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        adapter,
+        "wait_interval",
+        lambda _seconds, poll_interval=0.2: False,
+    )
+    monkeypatch.setattr(
+        adapter._monitor,
+        "crawl_incremental",
+        lambda channels, delay, max_pages: {
+            "commodities": 2,
+            "economy": 0,
+        },
+    )
+
+    adapter._run()
+
+    state = adapter.get_state()
+    assert state.last_run == finished_at
+    assert state.extra["last_poll_started_at"] == started_at
+    assert state.extra["last_poll_finished_at"] == finished_at
+    assert state.extra["last_success_at"] == finished_at
+    assert state.extra["last_round_duration_seconds"] == 2.0
+    assert state.extra["last_round_new"] == 2
+    assert state.extra["next_run_at"] == finished_at + timedelta(seconds=30)
+    assert state.extra["channel_stats"] == {"commodities": 2, "economy": 0}
+    assert state.extra["active_channels"] == ["commodities"]
+    assert state.extra["consecutive_failures"] == 0
+    assert state.extra["backoff_seconds"] == 0
+
+
+def test_investing_adapter_tracks_backoff_state_on_failure(monkeypatch) -> None:
+    failed_at = datetime(2026, 3, 15, 9, 30, 5)
+
+    class _FakeDatetime:
+        values = [failed_at, failed_at]
+
+        @classmethod
+        def now(cls):
+            if cls.values:
+                return cls.values.pop(0)
+            return failed_at
+
+    adapter = module.InvestingAdapter(
+        channels=["economy"],
+        interval=30,
+        delay=1.5,
+        max_pages=5,
+    )
+
+    monkeypatch.setattr(module, "datetime", _FakeDatetime)
+    monkeypatch.setattr(
+        adapter,
+        "wait_interval",
+        lambda _seconds, poll_interval=0.2: False,
+    )
+
+    def _raise_error(channels, delay, max_pages):
+        del channels, delay, max_pages
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(adapter._monitor, "crawl_incremental", _raise_error)
+
+    adapter._run()
+
+    state = adapter.get_state()
+    assert state.status == MonitorStatus.ERROR
+    assert state.last_error == "Investing: boom"
+    assert state.extra["last_poll_started_at"] == failed_at
+    assert state.extra["last_poll_finished_at"] == failed_at
+    assert state.extra["next_run_at"] == failed_at + timedelta(seconds=10)
+    assert state.extra["consecutive_failures"] == 1
+    assert state.extra["backoff_seconds"] == 10
 
 
 def test_longzhong_adapter_marks_interval_unit_as_minutes() -> None:

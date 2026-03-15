@@ -3,8 +3,9 @@
 """
 
 import sys
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -34,19 +35,183 @@ class WallStreetCNAdapter(MonitorAdapter):
         self.important_only = important_only
         self.output_dir = str(output_dir or DEFAULT_WSJ_OUTPUT_DIR)
         self._monitors = []
+        self._state_lock = threading.Lock()
+        self._run_now_generation = 0
+        self._channel_states = {
+            channel: {
+                "status": "idle",
+                "next_run_at": None,
+                "last_success_at": None,
+                "last_poll_started_at": None,
+                "last_poll_finished_at": None,
+                "last_round_duration_seconds": 0.0,
+                "last_round_new": 0,
+                "consecutive_failures": 0,
+                "backoff_seconds": 0,
+                "last_error": None,
+            }
+            for channel in channels
+        }
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
         self._state.extra["interval_unit"] = "seconds"
         self._state.extra["important_only"] = important_only
         self._state.extra["output_dir"] = self.output_dir
         self._state.extra["channel_stats"] = {}
+        self._state.extra["channel_statuses"] = {
+            channel: "idle" for channel in channels
+        }
+        self._state.extra["failed_channels"] = []
+        self._state.extra["consecutive_failures"] = 0
+        self._state.extra["backoff_seconds"] = 0
+
+    def _consume_run_now_broadcast(self, last_seen_generation: int) -> Optional[int]:
+        """返回尚未消费的 run-now 广播代次。"""
+        with self._state_lock:
+            if self._run_now_generation > last_seen_generation:
+                return self._run_now_generation
+        return None
+
+    def _sync_channel_aggregate_state(self) -> None:
+        """将各频道轮询状态聚合到统一控制台状态。"""
+        channel_statuses = {
+            channel: data.get("status", "idle")
+            for channel, data in self._channel_states.items()
+        }
+        failed_channels = sorted(
+            channel
+            for channel, data in self._channel_states.items()
+            if data.get("status") == "error"
+        )
+        next_run_times = [
+            data.get("next_run_at")
+            for data in self._channel_states.values()
+            if data.get("next_run_at") is not None
+        ]
+        last_success_times = [
+            data.get("last_success_at")
+            for data in self._channel_states.values()
+            if data.get("last_success_at") is not None
+        ]
+        last_started_times = [
+            data.get("last_poll_started_at")
+            for data in self._channel_states.values()
+            if data.get("last_poll_started_at") is not None
+        ]
+        last_finished_times = [
+            data.get("last_poll_finished_at")
+            for data in self._channel_states.values()
+            if data.get("last_poll_finished_at") is not None
+        ]
+
+        self._state.extra["channel_statuses"] = channel_statuses
+        self._state.extra["failed_channels"] = failed_channels
+        self._state.extra["next_run_at"] = (
+            min(next_run_times) if next_run_times else None
+        )
+        self._state.extra["last_success_at"] = (
+            max(last_success_times) if last_success_times else None
+        )
+        self._state.extra["last_poll_started_at"] = (
+            max(last_started_times) if last_started_times else None
+        )
+        self._state.extra["last_poll_finished_at"] = (
+            max(last_finished_times) if last_finished_times else None
+        )
+        self._state.extra["consecutive_failures"] = max(
+            (
+                int(data.get("consecutive_failures", 0))
+                for data in self._channel_states.values()
+            ),
+            default=0,
+        )
+        self._state.extra["backoff_seconds"] = max(
+            (
+                int(data.get("backoff_seconds", 0))
+                for data in self._channel_states.values()
+            ),
+            default=0,
+        )
+
+        if failed_channels:
+            self._state.status = MonitorStatus.ERROR
+        elif self.is_paused():
+            self._state.status = MonitorStatus.PAUSED
+        elif self.is_running() or any(
+            status == "running" for status in channel_statuses.values()
+        ):
+            self._state.status = MonitorStatus.RUNNING
+
+        if not failed_channels and self._state.last_error:
+            self._state.last_error = None
+
+    def _record_channel_poll_result(
+        self,
+        channel: str,
+        started_at: datetime,
+        finished_at: datetime,
+        new_count: int,
+        next_run_at: Optional[datetime],
+        error: Optional[Exception] = None,
+    ) -> None:
+        """记录单频道轮询结果并刷新聚合状态。"""
+        duration = max((finished_at - started_at).total_seconds(), 0.0)
+        with self._state_lock:
+            channel_state = self._channel_states.setdefault(
+                channel,
+                {
+                    "status": "idle",
+                    "next_run_at": None,
+                    "last_success_at": None,
+                    "last_poll_started_at": None,
+                    "last_poll_finished_at": None,
+                    "last_round_duration_seconds": 0.0,
+                    "last_round_new": 0,
+                    "consecutive_failures": 0,
+                    "backoff_seconds": 0,
+                    "last_error": None,
+                },
+            )
+            channel_state["last_poll_started_at"] = started_at
+            channel_state["last_poll_finished_at"] = finished_at
+            channel_state["last_round_duration_seconds"] = duration
+            channel_state["last_round_new"] = new_count
+            channel_state["next_run_at"] = next_run_at
+
+            self._state.last_run = finished_at
+            self._state.items_count = new_count
+            self._state.extra["last_channel"] = channel
+            self._state.extra["last_round_new"] = new_count
+            self._state.extra["last_round_duration_seconds"] = duration
+
+            if error is None:
+                channel_state["status"] = "running"
+                channel_state["last_success_at"] = finished_at
+                channel_state["consecutive_failures"] = 0
+                channel_state["backoff_seconds"] = 0
+                channel_state["last_error"] = None
+            else:
+                channel_state["status"] = "error"
+                channel_state["consecutive_failures"] = (
+                    int(channel_state.get("consecutive_failures", 0)) + 1
+                )
+                channel_state["backoff_seconds"] = max(
+                    (
+                        int((next_run_at - finished_at).total_seconds())
+                        if next_run_at is not None
+                        else 0
+                    ),
+                    0,
+                )
+                channel_state["last_error"] = str(error)
+                self._state.last_error = f"{channel}: {error}"
+
+            self._sync_channel_aggregate_state()
 
     def _on_new_items(self, channel_name: str, items: list):
         """处理新快讯"""
         if items:
-            self._state.items_count += len(items)
             self._state.total_items += len(items)
-            self._state.last_run = datetime.now()
             self._state.extra["last_channel"] = channel_name
             channel_stats = self._state.extra.setdefault("channel_stats", {})
             channel_stats[channel_name] = channel_stats.get(channel_name, 0) + len(
@@ -62,9 +227,49 @@ class WallStreetCNAdapter(MonitorAdapter):
             self._state.extra["last_items"] = recent_items
             self._state.extra["recent_items"] = recent_items
 
+    def _wait_for_channel_interval(
+        self,
+        seconds: int,
+        last_seen_generation: int,
+        poll_interval: float = 0.2,
+    ) -> tuple[bool, int]:
+        """等待频道下一轮轮询，同时支持源级 run-now 广播。"""
+        deadline = time.time() + max(seconds, 0)
+        while not self.should_stop():
+            if not self.wait_if_paused(poll_interval=poll_interval):
+                return False, last_seen_generation
+
+            generation = self._consume_run_now_broadcast(last_seen_generation)
+            if generation is not None:
+                return True, generation
+
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return True, last_seen_generation
+            time.sleep(min(poll_interval, remaining))
+
+        return False, last_seen_generation
+
+    def pause(self):
+        """暂停并同步源级聚合状态。"""
+        super().pause()
+        with self._state_lock:
+            self._sync_channel_aggregate_state()
+
+    def resume(self):
+        """恢复并同步源级聚合状态。"""
+        super().resume()
+        with self._state_lock:
+            self._sync_channel_aggregate_state()
+
+    def run_now(self):
+        """广播一次源级立即执行信号。"""
+        with self._state_lock:
+            self._run_now_generation += 1
+            self._state.extra["next_run_at"] = datetime.now()
+
     def _run(self):
         """运行监控"""
-        import threading
         from crawl.multi_commodity_monitor import save_to_json
 
         def monitor_channel(channel):
@@ -106,20 +311,26 @@ class WallStreetCNAdapter(MonitorAdapter):
 
             # 轮询循环 - 首次不延迟
             first_run = True
+            last_seen_generation = 0
             while not self.should_stop():
+                started_at = None
                 try:
-                    if not self.wait_if_paused():
-                        break
-                    if not first_run:
-                        if not self.wait_interval(self.interval):
+                    if first_run:
+                        if not self.wait_if_paused():
+                            break
+                    else:
+                        should_run, last_seen_generation = (
+                            self._wait_for_channel_interval(
+                                self.interval,
+                                last_seen_generation,
+                            )
+                        )
+                        if not should_run:
                             break
                     first_run = False
 
-                    new_items = crawler.fetch_incremental(
-                        last_id=monitor.last_id,
-                        channel=channel,
-                        important_only=self.important_only,
-                    )
+                    started_at = datetime.now()
+                    new_items = monitor._fetch_new_items_for_poll()
 
                     if new_items:
                         callback(new_items)
@@ -127,15 +338,34 @@ class WallStreetCNAdapter(MonitorAdapter):
                         if ids:
                             monitor.last_id = max(ids)
 
-                    # 成功后恢复状态
-                    if self._state.status == MonitorStatus.ERROR:
-                        self._state.status = MonitorStatus.RUNNING
+                    finished_at = datetime.now()
+                    self._record_channel_poll_result(
+                        channel=channel,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        new_count=len(new_items),
+                        next_run_at=finished_at + timedelta(seconds=self.interval),
+                    )
 
                 except Exception as e:
-                    self._state.status = MonitorStatus.ERROR
-                    self._state.last_error = f"{channel}: {e}"
-                    if not self.wait_interval(5):
+                    finished_at = datetime.now()
+                    self._record_channel_poll_result(
+                        channel=channel,
+                        started_at=started_at or finished_at,
+                        finished_at=finished_at,
+                        new_count=0,
+                        next_run_at=finished_at + timedelta(seconds=5),
+                        error=e,
+                    )
+                    should_retry, last_seen_generation = (
+                        self._wait_for_channel_interval(
+                            5,
+                            last_seen_generation,
+                        )
+                    )
+                    if not should_retry:
                         break
+                    first_run = True
 
         # 为每个频道创建线程
         threads = []
@@ -181,39 +411,91 @@ class InvestingAdapter(MonitorAdapter):
         self._state.extra["output_dir"] = output_dir
         self._state.extra["delay"] = delay
         self._state.extra["max_pages"] = max_pages
+        self._state.extra["channel_stats"] = {}
+        self._state.extra["active_channels"] = []
+        self._state.extra["consecutive_failures"] = 0
+        self._state.extra["backoff_seconds"] = 0
+
+    def _record_poll_result(
+        self,
+        started_at: datetime,
+        finished_at: datetime,
+        round_num: int,
+        stats: Optional[dict] = None,
+        error: Optional[Exception] = None,
+        backoff_seconds: int = 0,
+    ) -> None:
+        """记录 Investing 单轮轮询结果。"""
+        duration = max((finished_at - started_at).total_seconds(), 0.0)
+        self._state.last_run = finished_at
+        self._state.extra["round"] = round_num
+        self._state.extra["last_poll_started_at"] = started_at
+        self._state.extra["last_poll_finished_at"] = finished_at
+        self._state.extra["last_round_duration_seconds"] = duration
+        self._state.extra["next_run_at"] = finished_at + timedelta(
+            seconds=backoff_seconds or self.interval
+        )
+        self._state.extra["backoff_seconds"] = backoff_seconds
+
+        if error is None:
+            stats = dict(stats or {})
+            total_new = sum(stats.values())
+            self._state.items_count = total_new
+            self._state.total_items += total_new
+            self._state.extra["last_round_new"] = total_new
+            self._state.extra["last_success_at"] = finished_at
+            self._state.extra["stats"] = stats
+            self._state.extra["channel_stats"] = stats
+            self._state.extra["active_channels"] = [
+                channel for channel, count in stats.items() if count > 0
+            ]
+            self._state.extra["recent_items"] = [
+                {
+                    "time": finished_at.strftime("%H:%M:%S"),
+                    "title": f"{channel}: {count}",
+                }
+                for channel, count in stats.items()
+                if count > 0
+            ][:5]
+            self._state.extra["consecutive_failures"] = 0
+            self._state.last_error = None
+            self._state.status = MonitorStatus.RUNNING
+            return
+
+        self._state.items_count = 0
+        self._state.extra["last_round_new"] = 0
+        self._state.extra["stats"] = {}
+        self._state.extra["channel_stats"] = {}
+        self._state.extra["active_channels"] = []
+        self._state.extra["recent_items"] = []
+        self._state.extra["consecutive_failures"] = (
+            int(self._state.extra.get("consecutive_failures", 0)) + 1
+        )
+        self._state.last_error = f"Investing: {error}"
+        self._state.status = MonitorStatus.ERROR
 
     def _run(self):
         """运行监控"""
         round_num = 1
 
         while not self.should_stop():
+            started_at = None
             try:
                 if not self.wait_if_paused():
                     break
-                self._state.last_run = datetime.now()
+                started_at = datetime.now()
                 stats = self._monitor.crawl_incremental(
                     channels=self.channels,
                     delay=self.delay,
                     max_pages=self.max_pages,
                 )
-
-                total_new = sum(stats.values())
-                self._state.items_count = total_new
-                self._state.total_items += total_new
-                self._state.extra["round"] = round_num
-                self._state.extra["stats"] = stats
-                self._state.extra["recent_items"] = [
-                    {
-                        "time": self._state.last_run.strftime("%H:%M:%S"),
-                        "title": f"{channel}: {count}",
-                    }
-                    for channel, count in stats.items()
-                    if count > 0
-                ][:5]
-
-                # 成功后恢复状态
-                if self._state.status == MonitorStatus.ERROR:
-                    self._state.status = MonitorStatus.RUNNING
+                finished_at = datetime.now()
+                self._record_poll_result(
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    round_num=round_num,
+                    stats=stats,
+                )
 
                 round_num += 1
 
@@ -222,8 +504,14 @@ class InvestingAdapter(MonitorAdapter):
                     break
 
             except Exception as e:
-                self._state.status = MonitorStatus.ERROR
-                self._state.last_error = f"Investing: {e}"
+                finished_at = datetime.now()
+                self._record_poll_result(
+                    started_at=started_at or finished_at,
+                    finished_at=finished_at,
+                    round_num=round_num,
+                    error=e,
+                    backoff_seconds=10,
+                )
                 # 失败后等待10秒再重试
                 if not self.wait_interval(10):
                     break
