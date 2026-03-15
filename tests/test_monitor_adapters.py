@@ -93,6 +93,40 @@ def test_wallstreetcn_adapter_run_now_broadcasts_to_all_channels() -> None:
     assert adapter._consume_run_now_broadcast(1) is None
 
 
+def test_wallstreetcn_adapter_on_new_items_updates_state_under_lock() -> None:
+    class _CountingLock:
+        def __init__(self) -> None:
+            self.enter_count = 0
+
+        def __enter__(self):
+            self.enter_count += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    adapter = module.WallStreetCNAdapter(
+        channels=["oil-channel", "gold-channel"],
+        interval=30,
+    )
+    counting_lock = _CountingLock()
+    adapter._state_lock = counting_lock
+
+    adapter._on_new_items(
+        "oil-channel",
+        [
+            {"title": "快讯A", "display_time_str": "2026-03-16 10:00:00"},
+            {"title": "快讯B", "display_time_str": "2026-03-16 10:01:00"},
+        ],
+    )
+
+    assert counting_lock.enter_count >= 1
+    state = adapter.get_state()
+    assert state.total_items == 2
+    assert state.extra["channel_stats"]["oil-channel"] == 2
+
+
 def test_wallstreetcn_adapter_tracks_runtime_lifecycle_on_start_and_stop(
     monkeypatch,
 ) -> None:

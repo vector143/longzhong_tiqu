@@ -68,6 +68,27 @@ def test_investing_list_item_dedupe_uses_stable_identity_without_formatter(
     assert count == 0
 
 
+def test_investing_stable_digest_matches_between_list_item_and_standard_data(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(InvestingMonitor, "_load_seen_digests", lambda self: set())
+    monitor = InvestingMonitor(output_dir=str(tmp_path), rate_limit=0)
+
+    list_item = {
+        "title": "Take Five: Deja vu?",
+        "url": "https://www.investing.com/news/economy-news/take-five-deja-vu-4559066",
+        "summary": "War in the Middle East...",
+        "publish_time": "2026-03-13 07:36:25",
+        "author": "Reuters",
+        "category": "economy",
+    }
+    standard_data = monitor.formatter.format_to_standard(list_item)
+
+    assert monitor._build_stable_dedup_digest(
+        list_item
+    ) == monitor._build_stable_dedup_digest(standard_data)
+
+
 def test_investing_fetch_articles_concurrent_uses_fresh_crawler_instances(
     monkeypatch, tmp_path
 ):
@@ -205,6 +226,38 @@ def test_wallstreetcn_fetch_incremental_marks_incomplete_when_later_page_fails(
     assert [item["id"] for item in result.items] == list(range(120, 110, -1))
 
 
+def test_wallstreetcn_fetch_incremental_marks_incomplete_when_item_parse_fails(
+    monkeypatch,
+):
+    crawler = WallStreetCNLiveCrawler()
+    page_items = [_build_wsj_item(120), _build_wsj_item(119), _build_wsj_item(118)]
+
+    monkeypatch.setattr(
+        crawler,
+        "fetch_lives",
+        lambda **_kwargs: {
+            "success": True,
+            "data": page_items,
+            "next_cursor": None,
+            "error": None,
+        },
+    )
+
+    original_parse = crawler.parse_live_item
+
+    def fake_parse(item: Dict[str, Any]) -> Dict[str, Any]:
+        if item.get("id") == 119:
+            raise ValueError("parse failed")
+        return original_parse(item)
+
+    monkeypatch.setattr(crawler, "parse_live_item", fake_parse)
+
+    result = crawler.fetch_incremental_with_meta(last_id=100, limit=10)
+
+    assert result.complete is False
+    assert [item["id"] for item in result.items] == [120, 118]
+
+
 def test_wallstreetcn_monitor_does_not_advance_last_id_when_fetch_is_incomplete(
     monkeypatch,
 ):
@@ -296,6 +349,54 @@ def test_wallstreetcn_monitor_does_not_emit_duplicate_items_before_watermark_com
 
     assert monitor.last_id == 105
     assert collected_ids == [105, 104, 103]
+
+
+def test_wallstreetcn_monitor_commits_watermark_even_when_callback_items_empty(
+    monkeypatch,
+):
+    class _BaselineCrawler:
+        def fetch_incremental(
+            self,
+            last_id: int | None = None,
+            channel: str = "global-channel",
+            limit: int = 20,
+            important_only: bool = False,
+            min_score: int = 1,
+        ) -> List[Dict[str, Any]]:
+            del channel, limit, important_only, min_score
+            if last_id is None:
+                return [_build_wsj_item(100)]
+            return []
+
+    crawler = _BaselineCrawler()
+    monitor = WallStreetCNMonitor(crawler=crawler, poll_interval=1)
+    collected_ids: List[int] = []
+    sleep_calls = {"count": 0}
+    poll_results = [
+        ([_build_wsj_item(105)], False),
+        ([_build_wsj_item(105)], True),
+    ]
+
+    def fake_sleep(_seconds: int) -> None:
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 2:
+            raise KeyboardInterrupt
+
+    def fake_fetch_for_poll():
+        if poll_results:
+            return poll_results.pop(0)
+        return [], True
+
+    def callback(items: List[Dict[str, Any]]) -> None:
+        collected_ids.extend(item["id"] for item in items)
+
+    monkeypatch.setattr("crawl.wallstreetcn.time.sleep", fake_sleep)
+    monkeypatch.setattr(monitor, "_fetch_new_items_for_poll", fake_fetch_for_poll)
+
+    monitor.start(callback=callback)
+
+    assert monitor.last_id == 105
+    assert collected_ids == [105]
 
 
 def test_wallstreetcn_monitor_drains_all_new_items_from_single_poll(monkeypatch):

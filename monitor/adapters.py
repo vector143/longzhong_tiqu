@@ -248,7 +248,10 @@ class WallStreetCNAdapter(MonitorAdapter):
 
     def _on_new_items(self, channel_name: str, items: list):
         """处理新快讯"""
-        if items:
+        if not items:
+            return
+
+        with self._state_lock:
             self._state.total_items += len(items)
             self._state.extra["last_channel"] = channel_name
             channel_stats = self._state.extra.setdefault("channel_stats", {})
@@ -376,10 +379,11 @@ class WallStreetCNAdapter(MonitorAdapter):
 
                     if callback_items:
                         callback(callback_items)
-                        if poll_complete:
-                            ids = [item["id"] for item in new_items if item.get("id")]
-                            if ids:
-                                monitor.last_id = max(ids)
+
+                    if new_items and poll_complete:
+                        ids = [item["id"] for item in new_items if item.get("id")]
+                        if ids:
+                            monitor.last_id = max(ids)
 
                     finished_at = datetime.now()
                     self._record_channel_poll_result(

@@ -214,6 +214,7 @@ class WallStreetCNLiveCrawler:
         seen_ids = set()
         max_pages = 5
         drain_complete = last_id is None
+        parse_failed = False
 
         for _ in range(max_pages):
             result = self.fetch_lives(
@@ -247,10 +248,14 @@ class WallStreetCNLiveCrawler:
                     parsed_items.append(parsed)
                 except Exception as e:
                     print(f"⚠️ 解析快讯失败: {e}")
+                    parse_failed = True
                     continue
 
             if last_id is None:
-                return IncrementalFetchResult(items=parsed_items, complete=True)
+                return IncrementalFetchResult(
+                    items=parsed_items,
+                    complete=not parse_failed,
+                )
 
             if stop_pagination:
                 drain_complete = True
@@ -261,7 +266,10 @@ class WallStreetCNLiveCrawler:
                 drain_complete = True
                 break
 
-        return IncrementalFetchResult(items=parsed_items, complete=drain_complete)
+        return IncrementalFetchResult(
+            items=parsed_items,
+            complete=(drain_complete and not parse_failed),
+        )
 
     def fetch_incremental(
         self,
@@ -443,19 +451,19 @@ class WallStreetCNMonitor:
 
                 if callback_items:
                     print(f"📰 发现 {len(callback_items)} 条新快讯")
+                else:
+                    print("⏳ 暂无新快讯")
 
+                if callback_items and callback:
+                    callback(callback_items)
+
+                if new_items:
                     if poll_complete:
                         max_id = max(item["id"] for item in new_items if item.get("id"))
                         if max_id and (not self.last_id or max_id > self.last_id):
                             self.last_id = max_id
                     else:
                         print("⚠️ 本轮未完整抓取到旧水位，暂不推进 last_id")
-
-                    # 调用回调函数
-                    if callback:
-                        callback(callback_items)
-                else:
-                    print("⏳ 暂无新快讯")
 
             except KeyboardInterrupt:
                 print("\n⏹️ 监控已停止")

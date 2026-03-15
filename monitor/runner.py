@@ -223,6 +223,26 @@ def _find_keyword_overlaps(keywords: List[str]) -> List[Tuple[str, str]]:
     return overlaps
 
 
+def _clone_cookies_manager(
+    base_manager: OilChemCookiesManager,
+) -> OilChemCookiesManager:
+    """
+    克隆 Cookie 管理器，隔离多关键词并发时的 requests.Session。
+    """
+    cloned = OilChemCookiesManager(base_manager.cookies_file)
+    if not hasattr(base_manager, "session") or not hasattr(cloned, "session"):
+        return cloned
+
+    try:
+        cloned.session.cookies.clear()
+        cloned.session.cookies.update(base_manager.session.cookies)
+        cloned.session.headers.update(dict(base_manager.session.headers))
+    except Exception:
+        return cloned
+
+    return cloned
+
+
 def _run_history_crawl(
     keywords: List[str],
     days_back: Optional[int],
@@ -439,12 +459,17 @@ def build_monitor_runtime(
 
         schedulers: List[CrawlScheduler] = []
         for keyword in keywords:
+            scheduler_cookies_manager = (
+                _clone_cookies_manager(cookies_manager)
+                if len(keywords) > 1
+                else cookies_manager
+            )
             schedulers.append(
                 CrawlScheduler(
                     state,
                     interval_minutes=interval_minutes,
                     keyword=keyword,
-                    cookies_manager=cookies_manager,
+                    cookies_manager=scheduler_cookies_manager,
                     converter=converter,
                     existing_ids=existing_ids,
                     output_formats=settings.output.default_formats.copy(),

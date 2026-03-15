@@ -286,3 +286,82 @@ def test_build_monitor_runtime_reuses_scheduler_stack_for_embedded_usage(
     assert len(rate_limiters) == 2
     assert rate_limiters[0] is not None
     assert rate_limiters[0] is rate_limiters[1]
+
+
+def test_build_monitor_runtime_uses_isolated_cookies_manager_per_keyword(monkeypatch):
+    cookies_managers = []
+
+    class _DummyScheduler:
+        def __init__(self, _state, **kwargs) -> None:
+            cookies_managers.append(kwargs.get("cookies_manager"))
+            self.is_running = False
+
+        def start(self) -> None:
+            self.is_running = True
+
+        def stop(self, wait_for_job: bool = False, timeout: float = 60.0) -> None:
+            del wait_for_job, timeout
+            self.is_running = False
+
+        def run_now(self) -> None:
+            return None
+
+        def pause(self) -> None:
+            return None
+
+        def resume(self) -> None:
+            return None
+
+    class _DummyMultiScheduler:
+        def __init__(self, schedulers, _state) -> None:
+            self.schedulers = schedulers
+            self.is_running = False
+            self.is_paused = False
+
+        def start(self) -> None:
+            self.is_running = True
+
+        def stop(self, wait_for_job: bool = False, timeout: float = 60.0) -> None:
+            del wait_for_job, timeout
+            self.is_running = False
+
+        def run_now(self) -> None:
+            return None
+
+        def pause(self) -> None:
+            self.is_paused = True
+
+        def resume(self) -> None:
+            self.is_paused = False
+
+    monkeypatch.setattr(runner, "get_settings", lambda: _make_settings("原油"))
+    monkeypatch.setattr(runner, "OilChemCookiesManager", _DummyCookiesManager)
+    monkeypatch.setattr(runner, "UniversalNamingSystem", _DummyNamingSystem)
+    monkeypatch.setattr(runner, "AsyncFormatConverter", _DummyConverter)
+    monkeypatch.setattr(runner, "MonitorState", _DummyState)
+    monkeypatch.setattr(runner, "ThreadSafeSet", lambda items: set(items))
+    monkeypatch.setattr(runner, "CrawlScheduler", _DummyScheduler)
+    monkeypatch.setattr(runner, "MultiCrawlScheduler", _DummyMultiScheduler)
+    monkeypatch.setattr(runner, "_preflight_check", lambda _cookies: (True, [], []))
+    monkeypatch.setattr(runner, "_print_preflight", lambda errors, warnings: None)
+    monkeypatch.setattr(
+        runner,
+        "_run_history_crawl",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("no_history=True 时不应执行历史爬取")
+        ),
+    )
+
+    runtime = runner.build_monitor_runtime(
+        keywords=["甲醇", "PTA"],
+        interval_minutes=15,
+        no_history=True,
+        enable_pid=False,
+    )
+
+    assert runtime.controller is runtime.scheduler_controller
+    assert len(cookies_managers) == 2
+    assert cookies_managers[0] is not None
+    assert cookies_managers[1] is not None
+    assert cookies_managers[0] is not cookies_managers[1]
+    assert runtime.cookies_manager not in cookies_managers

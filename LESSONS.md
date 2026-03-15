@@ -26,3 +26,7 @@
 - [crawl/wallstreetcn.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/wallstreetcn.py#L190) 的增量轮询必须显式返回“抓取是否完整”的信号；分页失败或命中翻页上限时不能推进 `last_id`，否则会永久漏抓。
 - [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py#L176) 的判重要在入口层统一稳定键（`article_id/url`）；列表态不应依赖 formatter 的全文摘要字段来决定是否抓正文。
 - [monitor/scheduler.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/scheduler.py#L397) 的共享 `request_gate` 应只包会话校验，不应包整轮 `incremental_crawl`；否则多关键词会退化为串行轮询。
+- WSJ 水位提交不能绑定在“本轮是否有回调输出”上；即使 `callback_items` 因去重为空，只要轮询已完整并拿到 `new_items`，仍需推进 `last_id`，否则会重复拉取同一批数据。
+- [crawl/wallstreetcn.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/wallstreetcn.py#L248) 这类页内解析异常不能默默吞掉并继续标记 `complete=True`；解析失败也要降级完整性，避免推进水位后永久漏抓。
+- Investing 稳定判重键要优先用原始列表态字段（`id/url`）；不要混用 formatter 生成的 `article_id`（尤其 URL hash 回填场景），否则列表态与正文态会出现判重不一致。
+- 多关键词并发下如果要放开整轮 crawl 的 `request_gate`，必须同时隔离每个 scheduler 的 `OilChemCookiesManager`/Session；否则共享 Session 线程安全风险会被放大。

@@ -176,22 +176,30 @@ class InvestingMonitor:
         """
         构建稳定去重 digest（列表态与正文态统一）
 
-        优先使用 article_id / URL 生成稳定键，缺失时回退 formatter 生成。
+        优先使用 article_id / URL 生成稳定键，缺失时回退标题+正文摘要键。
         """
-        article_id = str(item.get("id") or item.get("article_id") or "").strip()
+        raw_article_id = str(item.get("id") or "").strip()
+        article_id = str(item.get("article_id") or "").strip()
         source_url = str(
             item.get("url") or item.get("source_url") or item.get("link") or ""
         ).strip()
 
-        if article_id and source_url:
-            dedup_key = f"{article_id}|{source_url}"
+        if raw_article_id and source_url:
+            dedup_key = f"{raw_article_id}|{source_url}"
             return hashlib.sha1(dedup_key.encode("utf-8")).hexdigest()
-        if article_id:
-            return hashlib.sha1(article_id.encode("utf-8")).hexdigest()
+        if raw_article_id:
+            return hashlib.sha1(raw_article_id.encode("utf-8")).hexdigest()
         if source_url:
             return hashlib.sha1(source_url.encode("utf-8")).hexdigest()
+        if article_id:
+            return hashlib.sha1(article_id.encode("utf-8")).hexdigest()
 
-        return self.formatter.format_to_standard(item)["content_digest"]
+        title = str(item.get("title") or "").strip()
+        content = str(
+            item.get("content") or item.get("summary") or item.get("cleaned_text") or ""
+        ).strip()
+        fallback_key = f"{title}|{content}"
+        return hashlib.sha1(fallback_key.encode("utf-8")).hexdigest()
 
     def _save_article(self, article: Dict[str, Any], channel: str) -> bool:
         """
@@ -302,7 +310,7 @@ class InvestingMonitor:
 
                         # 转换为标准格式
                         standard_data = self.formatter.format_to_standard(news_item)
-                        content_digest = self._build_stable_dedup_digest(standard_data)
+                        content_digest = self._build_stable_dedup_digest(news_item)
 
                         # 去重检查
                         if self._is_duplicate(content_digest):
@@ -458,7 +466,7 @@ class InvestingMonitor:
                         news_item["author"] = content_result["author"]
 
                     standard_data = self.formatter.format_to_standard(news_item)
-                    content_digest = self._build_stable_dedup_digest(standard_data)
+                    content_digest = self._build_stable_dedup_digest(news_item)
 
                     # 线程安全的去重检查和保存
                     with self.lock:
