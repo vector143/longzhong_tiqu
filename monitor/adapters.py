@@ -36,6 +36,7 @@ class WallStreetCNAdapter(MonitorAdapter):
         self._monitors = []
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
+        self._state.extra["interval_unit"] = "seconds"
 
     def _on_new_items(self, channel_name: str, items: list):
         """处理新快讯"""
@@ -44,13 +45,15 @@ class WallStreetCNAdapter(MonitorAdapter):
             self._state.total_items += len(items)
             self._state.last_run = datetime.now()
             self._state.extra["last_channel"] = channel_name
-            self._state.extra["last_items"] = [
+            recent_items = [
                 {
                     "title": item.get("title", "")[:50],
                     "time": item.get("display_time_str", ""),
                 }
                 for item in items[:5]
             ]
+            self._state.extra["last_items"] = recent_items
+            self._state.extra["recent_items"] = recent_items
 
     def _run(self):
         """运行监控"""
@@ -98,8 +101,11 @@ class WallStreetCNAdapter(MonitorAdapter):
             first_run = True
             while not self.should_stop():
                 try:
+                    if not self.wait_if_paused():
+                        break
                     if not first_run:
-                        time.sleep(self.interval)
+                        if not self.wait_interval(self.interval):
+                            break
                     first_run = False
 
                     new_items = crawler.fetch_incremental(
@@ -121,7 +127,8 @@ class WallStreetCNAdapter(MonitorAdapter):
                 except Exception as e:
                     self._state.status = MonitorStatus.ERROR
                     self._state.last_error = f"{channel}: {e}"
-                    time.sleep(5)
+                    if not self.wait_interval(5):
+                        break
 
         # 为每个频道创建线程
         threads = []
@@ -158,6 +165,7 @@ class InvestingAdapter(MonitorAdapter):
         self._monitor = InvestingMonitor(output_dir=output_dir, proxy=proxy)
         self._state.extra["channels"] = channels
         self._state.extra["interval"] = interval
+        self._state.extra["interval_unit"] = "seconds"
         self._state.extra["proxy"] = proxy
 
     def _run(self):
@@ -166,6 +174,8 @@ class InvestingAdapter(MonitorAdapter):
 
         while not self.should_stop():
             try:
+                if not self.wait_if_paused():
+                    break
                 self._state.last_run = datetime.now()
                 stats = self._monitor.crawl_incremental(
                     channels=self.channels, delay=3.0, max_pages=3
@@ -176,6 +186,14 @@ class InvestingAdapter(MonitorAdapter):
                 self._state.total_items += total_new
                 self._state.extra["round"] = round_num
                 self._state.extra["stats"] = stats
+                self._state.extra["recent_items"] = [
+                    {
+                        "time": self._state.last_run.strftime("%H:%M:%S"),
+                        "title": f"{channel}: {count}",
+                    }
+                    for channel, count in stats.items()
+                    if count > 0
+                ][:5]
 
                 # 成功后恢复状态
                 if self._state.status == MonitorStatus.ERROR:
@@ -184,19 +202,15 @@ class InvestingAdapter(MonitorAdapter):
                 round_num += 1
 
                 # 等待下一轮，支持中断
-                for _ in range(self.interval):
-                    if self.should_stop():
-                        break
-                    time.sleep(1)
+                if not self.wait_interval(self.interval):
+                    break
 
             except Exception as e:
                 self._state.status = MonitorStatus.ERROR
                 self._state.last_error = f"Investing: {e}"
                 # 失败后等待10秒再重试
-                for _ in range(10):
-                    if self.should_stop():
-                        break
-                    time.sleep(1)
+                if not self.wait_interval(10):
+                    break
 
 
 class LongZhongAdapter(MonitorAdapter):
@@ -214,6 +228,7 @@ class LongZhongAdapter(MonitorAdapter):
         self.no_history = no_history
         self._state.extra["keywords"] = keywords
         self._state.extra["interval"] = interval
+        self._state.extra["interval_unit"] = "minutes"
 
     def _run(self):
         """运行监控 - 使用简化的调度逻辑"""
@@ -260,8 +275,11 @@ class LongZhongAdapter(MonitorAdapter):
             round_num = 1
             while not self.should_stop():
                 try:
+                    if not self.wait_if_paused():
+                        break
                     self._state.last_run = datetime.now()
                     self._state.extra["round"] = round_num
+                    recent_items = []
 
                     for keyword in self.keywords:
                         if self.should_stop():
@@ -289,6 +307,14 @@ class LongZhongAdapter(MonitorAdapter):
 
                         self._state.items_count += 1  # 简化计数
                         self._state.total_items += 1
+                        recent_items.append(
+                            {
+                                "time": self._state.last_run.strftime("%H:%M:%S"),
+                                "title": f"完成关键词: {keyword}",
+                            }
+                        )
+
+                    self._state.extra["recent_items"] = recent_items[:5]
 
                     # 成功后恢复状态
                     if self._state.status == MonitorStatus.ERROR:
@@ -298,19 +324,15 @@ class LongZhongAdapter(MonitorAdapter):
 
                     # 等待下一轮（分钟转秒）
                     wait_seconds = self.interval * 60
-                    for _ in range(wait_seconds):
-                        if self.should_stop():
-                            break
-                        time.sleep(1)
+                    if not self.wait_interval(wait_seconds):
+                        break
 
                 except Exception as e:
                     self._state.status = MonitorStatus.ERROR
                     self._state.last_error = f"隆众: {e}"
                     # 失败后等待1分钟再重试
-                    for _ in range(60):
-                        if self.should_stop():
-                            break
-                        time.sleep(1)
+                    if not self.wait_interval(60):
+                        break
 
         except Exception as e:
             self._state.status = MonitorStatus.ERROR

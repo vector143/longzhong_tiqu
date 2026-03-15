@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum
 from threading import Event, Thread
 from typing import Any, Dict, Optional
+import time
 
 
 class MonitorStatus(Enum):
@@ -42,6 +43,8 @@ class MonitorAdapter(ABC):
     def __init__(self, name: str):
         self.name = name
         self._stop_event = Event()
+        self._pause_event = Event()
+        self._run_now_event = Event()
         self._thread: Optional[Thread] = None
         self._state = MonitorState(name=name)
         self._start_time: Optional[datetime] = None
@@ -57,6 +60,8 @@ class MonitorAdapter(ABC):
             return
 
         self._stop_event.clear()
+        self._pause_event.clear()
+        self._run_now_event.clear()
         self._start_time = datetime.now()
         self._state.status = MonitorStatus.RUNNING
         self._thread = Thread(target=self._run_wrapper, daemon=True)
@@ -73,6 +78,8 @@ class MonitorAdapter(ABC):
     def stop(self, timeout: float = 10.0):
         """停止监控"""
         self._stop_event.set()
+        self._pause_event.clear()
+        self._run_now_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
         self._state.status = MonitorStatus.STOPPED
@@ -92,3 +99,58 @@ class MonitorAdapter(ABC):
     def should_stop(self) -> bool:
         """检查是否应该停止"""
         return self._stop_event.is_set()
+
+    def pause(self):
+        """暂停监控轮询"""
+        if self._state.status == MonitorStatus.RUNNING:
+            self._state.status = MonitorStatus.PAUSED
+        self._pause_event.set()
+
+    def resume(self):
+        """恢复监控轮询"""
+        self._pause_event.clear()
+        if self.is_running() and self._state.status == MonitorStatus.PAUSED:
+            self._state.status = MonitorStatus.RUNNING
+
+    def run_now(self):
+        """触发下一轮立即执行"""
+        self._run_now_event.set()
+
+    def is_paused(self) -> bool:
+        """检查是否已暂停"""
+        return self._pause_event.is_set()
+
+    def get_capabilities(self) -> Dict[str, bool]:
+        """返回统一控制台可用能力"""
+        return {
+            "start": True,
+            "stop": True,
+            "pause": True,
+            "resume": True,
+            "run_now": True,
+        }
+
+    def wait_if_paused(self, poll_interval: float = 0.2) -> bool:
+        """在暂停状态下阻塞等待，直到恢复或停止"""
+        while self._pause_event.is_set() and not self.should_stop():
+            self._state.status = MonitorStatus.PAUSED
+            time.sleep(poll_interval)
+
+        if not self.should_stop() and self.is_running():
+            self._state.status = MonitorStatus.RUNNING
+        return not self.should_stop()
+
+    def wait_interval(self, seconds: int, poll_interval: float = 0.2) -> bool:
+        """等待指定秒数，同时响应暂停、立即运行和停止"""
+        deadline = time.time() + max(seconds, 0)
+        while not self.should_stop():
+            if not self.wait_if_paused(poll_interval=poll_interval):
+                return False
+            if self._run_now_event.is_set():
+                self._run_now_event.clear()
+                return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return True
+            time.sleep(min(poll_interval, remaining))
+        return False
