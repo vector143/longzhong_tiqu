@@ -394,17 +394,15 @@ class CrawlScheduler:
         def _run_once() -> CrawlResult:
             # M2: 在执行爬取前获取令牌，确保请求速率受控
             self._rate_limiter.acquire(blocking=True)
-            return self._run_with_request_gate(
-                lambda: incremental_crawl(
-                    keyword=self.keyword,
-                    existing_ids=self.existing_ids,
-                    cookies_manager=self.cookies_manager,
-                    converter=self.converter,
-                    output_formats=self.output_formats,
-                    max_pages=self.max_pages,
-                    early_stop_threshold=self.early_stop_threshold,
-                    delay=self._delay,
-                )
+            return incremental_crawl(
+                keyword=self.keyword,
+                existing_ids=self.existing_ids,
+                cookies_manager=self.cookies_manager,
+                converter=self.converter,
+                output_formats=self.output_formats,
+                max_pages=self.max_pages,
+                early_stop_threshold=self.early_stop_threshold,
+                delay=self._delay,
             )
 
         # 无重试时直接执行

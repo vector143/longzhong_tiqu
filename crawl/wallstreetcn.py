@@ -5,9 +5,18 @@
 """
 
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import requests
 from datetime import datetime
+
+
+@dataclass
+class IncrementalFetchResult:
+    """增量抓取结果（包含完整性标记）"""
+
+    items: List[Dict[str, Any]]
+    complete: bool
 
 
 class WallStreetCNLiveCrawler:
@@ -179,14 +188,14 @@ class WallStreetCNLiveCrawler:
         text = text.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">")
         return text.strip()
 
-    def fetch_incremental(
+    def fetch_incremental_with_meta(
         self,
         last_id: Optional[int] = None,
         channel: str = "global-channel",
         limit: int = 20,
         important_only: bool = False,
         min_score: int = 1,
-    ) -> List[Dict[str, Any]]:
+    ) -> IncrementalFetchResult:
         """
         增量获取新快讯
 
@@ -198,12 +207,13 @@ class WallStreetCNLiveCrawler:
             min_score: 最低评分过滤（1=全部, 2=重要）
 
         Returns:
-            新快讯列表（已解析为统一格式）
+            增量抓取结果（包含新快讯与完整性标记）
         """
         cursor: Optional[str] = None
         parsed_items: List[Dict[str, Any]] = []
         seen_ids = set()
         max_pages = 5
+        drain_complete = last_id is None
 
         for _ in range(max_pages):
             result = self.fetch_lives(
@@ -216,7 +226,7 @@ class WallStreetCNLiveCrawler:
 
             if not result["success"]:
                 print(f"❌ 获取快讯失败: {result['error']}")
-                break
+                return IncrementalFetchResult(items=parsed_items, complete=False)
 
             stop_pagination = False
 
@@ -239,14 +249,39 @@ class WallStreetCNLiveCrawler:
                     print(f"⚠️ 解析快讯失败: {e}")
                     continue
 
-            if last_id is None or stop_pagination:
+            if last_id is None:
+                return IncrementalFetchResult(items=parsed_items, complete=True)
+
+            if stop_pagination:
+                drain_complete = True
                 break
 
             cursor = result.get("next_cursor")
             if not cursor or not result["data"]:
+                drain_complete = True
                 break
 
-        return parsed_items
+        return IncrementalFetchResult(items=parsed_items, complete=drain_complete)
+
+    def fetch_incremental(
+        self,
+        last_id: Optional[int] = None,
+        channel: str = "global-channel",
+        limit: int = 20,
+        important_only: bool = False,
+        min_score: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """
+        增量获取新快讯（仅返回数据列表，兼容旧调用方）
+        """
+        result = self.fetch_incremental_with_meta(
+            last_id=last_id,
+            channel=channel,
+            limit=limit,
+            important_only=important_only,
+            min_score=min_score,
+        )
+        return result.items
 
 
 class WallStreetCNMonitor:
@@ -279,20 +314,74 @@ class WallStreetCNMonitor:
         self.is_running = False
         self.fetch_limit = 20
         self.max_drain_rounds = 3
+        self._pending_item_keys = set()
 
-    def _fetch_new_items_for_poll(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _item_dedupe_key(item: Dict[str, Any]) -> Any:
+        """构建快讯去重键。"""
+        item_id = item.get("id")
+        if item_id is not None:
+            return ("id", item_id)
+        item_url = item.get("url")
+        if item_url:
+            return ("url", item_url)
+        return (
+            "fallback",
+            item.get("title"),
+            item.get("display_time_str"),
+            item.get("content_text"),
+        )
+
+    def prepare_callback_items(
+        self, items: List[Dict[str, Any]], poll_complete: bool
+    ) -> List[Dict[str, Any]]:
+        """
+        过滤回调输出，避免不完整轮询期间重复推送同一批数据。
+        """
+        callback_items: List[Dict[str, Any]] = []
+        for item in items:
+            dedupe_key = self._item_dedupe_key(item)
+            if dedupe_key in self._pending_item_keys:
+                continue
+            callback_items.append(item)
+            if not poll_complete:
+                self._pending_item_keys.add(dedupe_key)
+
+        if poll_complete:
+            self._pending_item_keys.clear()
+
+        return callback_items
+
+    def _fetch_new_items_for_poll(self) -> tuple[List[Dict[str, Any]], bool]:
         """单轮轮询内尽量拉齐所有新增快讯，避免窗口截断漏数。"""
         collected: List[Dict[str, Any]] = []
         seen_ids = set()
+        poll_complete = self.last_id is None
 
         for _ in range(self.max_drain_rounds):
-            batch = self.crawler.fetch_incremental(
-                last_id=self.last_id,
-                channel=self.channel,
-                limit=self.fetch_limit,
-                important_only=self.important_only,
-                min_score=self.min_score,
-            )
+            if hasattr(self.crawler, "fetch_incremental_with_meta"):
+                result = self.crawler.fetch_incremental_with_meta(
+                    last_id=self.last_id,
+                    channel=self.channel,
+                    limit=self.fetch_limit,
+                    important_only=self.important_only,
+                    min_score=self.min_score,
+                )
+                batch = result.items
+                batch_complete = result.complete
+            else:
+                batch = self.crawler.fetch_incremental(
+                    last_id=self.last_id,
+                    channel=self.channel,
+                    limit=self.fetch_limit,
+                    important_only=self.important_only,
+                    min_score=self.min_score,
+                )
+                batch_complete = len(batch) < self.fetch_limit
+
+            if batch_complete:
+                poll_complete = True
+
             if not batch:
                 break
 
@@ -310,10 +399,10 @@ class WallStreetCNMonitor:
 
             collected.extend(fresh_batch)
 
-            if len(batch) < self.fetch_limit:
+            if batch_complete or len(batch) < self.fetch_limit:
                 break
 
-        return collected
+        return collected, poll_complete
 
     def start(self, callback=None):
         """
@@ -348,19 +437,23 @@ class WallStreetCNMonitor:
                 time.sleep(self.poll_interval)
 
                 # 获取增量数据
-                new_items = self._fetch_new_items_for_poll()
+                new_items, poll_complete = self._fetch_new_items_for_poll()
 
-                if new_items:
-                    print(f"📰 发现 {len(new_items)} 条新快讯")
+                callback_items = self.prepare_callback_items(new_items, poll_complete)
 
-                    # 更新last_id
-                    max_id = max(item["id"] for item in new_items if item.get("id"))
-                    if max_id and (not self.last_id or max_id > self.last_id):
-                        self.last_id = max_id
+                if callback_items:
+                    print(f"📰 发现 {len(callback_items)} 条新快讯")
+
+                    if poll_complete:
+                        max_id = max(item["id"] for item in new_items if item.get("id"))
+                        if max_id and (not self.last_id or max_id > self.last_id):
+                            self.last_id = max_id
+                    else:
+                        print("⚠️ 本轮未完整抓取到旧水位，暂不推进 last_id")
 
                     # 调用回调函数
                     if callback:
-                        callback(new_items)
+                        callback(callback_items)
                 else:
                     print("⏳ 暂无新快讯")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -7,13 +8,25 @@ from typing import Any, Dict, List
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crawl.investing_monitor import InvestingMonitor
-from crawl.wallstreetcn import WallStreetCNMonitor
+from crawl.wallstreetcn import WallStreetCNLiveCrawler, WallStreetCNMonitor
 
 
-def test_investing_list_item_quick_dedupe_matches_saved_article(monkeypatch, tmp_path):
+def _build_wsj_item(item_id: int) -> Dict[str, Any]:
+    return {
+        "id": item_id,
+        "title": f"快讯 {item_id}",
+        "content_text": f"内容 {item_id}",
+        "display_time_str": f"2026-03-14 10:{item_id % 60:02d}:00",
+        "url": f"https://wallstreetcn.com/live/{item_id}",
+    }
+
+
+def test_investing_list_item_dedupe_uses_stable_identity_without_formatter(
+    monkeypatch, tmp_path
+):
     monkeypatch.setattr(InvestingMonitor, "_load_seen_digests", lambda self: set())
 
-    monitor = InvestingMonitor(output_dir=str(tmp_path))
+    monitor = InvestingMonitor(output_dir=str(tmp_path), rate_limit=0)
 
     list_item = {
         "id": "4559066",
@@ -24,17 +37,35 @@ def test_investing_list_item_quick_dedupe_matches_saved_article(monkeypatch, tmp
         "author": "Reuters",
         "category": "economy",
     }
-    saved_item = {
-        **list_item,
-        "content": "LONDON, March 13 (Reuters) - War in the Middle East continues.",
-    }
+    stable_digest = hashlib.sha1(
+        f"{list_item['id']}|{list_item['url']}".encode("utf-8")
+    ).hexdigest()
+    monitor.seen_digests.add(stable_digest)
 
-    saved_digest = monitor.formatter.format_to_standard(saved_item)["content_digest"]
-    monitor.seen_digests.add(saved_digest)
+    class _FormatterGuard:
+        def format_to_standard(self, _item):
+            raise AssertionError("列表态判重不应依赖 formatter.format_to_standard")
 
-    quick_digest = monitor.formatter.format_to_standard(list_item)["content_digest"]
+    class _ListCrawler:
+        def __init__(self, channel: str, proxy: str | None = None) -> None:
+            self.channel = channel
+            self.proxy = proxy
 
-    assert monitor._is_duplicate(quick_digest) is True
+        def fetch_news_list(self, page: int, delay: float) -> Dict[str, Any]:
+            del delay
+            if page == 1:
+                return {"success": True, "data": [dict(list_item)]}
+            return {"success": True, "data": []}
+
+    monitor.formatter = _FormatterGuard()
+    monkeypatch.setattr(
+        "crawl.investing_monitor.InvestingCommodityNewsCrawler", _ListCrawler
+    )
+
+    channel, count = monitor._crawl_channel_incremental(channel="economy", max_pages=1)
+
+    assert channel == "economy"
+    assert count == 0
 
 
 def test_investing_fetch_articles_concurrent_uses_fresh_crawler_instances(
@@ -142,6 +173,129 @@ class OverflowCrawler:
             "display_time_str": f"2026-03-14 10:{item_id % 60:02d}:00",
             "url": f"https://wallstreetcn.com/live/{item_id}",
         }
+
+
+def test_wallstreetcn_fetch_incremental_marks_incomplete_when_later_page_fails(
+    monkeypatch,
+):
+    crawler = WallStreetCNLiveCrawler()
+    responses = [
+        {
+            "success": True,
+            "data": [_build_wsj_item(item_id) for item_id in range(120, 110, -1)],
+            "next_cursor": "cursor-2",
+            "error": None,
+        },
+        {
+            "success": False,
+            "data": [],
+            "next_cursor": None,
+            "error": "network timeout",
+        },
+    ]
+
+    def fake_fetch_lives(**_kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(crawler, "fetch_lives", fake_fetch_lives)
+
+    result = crawler.fetch_incremental_with_meta(last_id=100, limit=10)
+
+    assert result.complete is False
+    assert [item["id"] for item in result.items] == list(range(120, 110, -1))
+
+
+def test_wallstreetcn_monitor_does_not_advance_last_id_when_fetch_is_incomplete(
+    monkeypatch,
+):
+    class _BaselineCrawler:
+        def fetch_incremental(
+            self,
+            last_id: int | None = None,
+            channel: str = "global-channel",
+            limit: int = 20,
+            important_only: bool = False,
+            min_score: int = 1,
+        ) -> List[Dict[str, Any]]:
+            del channel, limit, important_only, min_score
+            if last_id is None:
+                return [_build_wsj_item(100)]
+            return []
+
+    crawler = _BaselineCrawler()
+    monitor = WallStreetCNMonitor(crawler=crawler, poll_interval=1)
+    collected_ids: List[int] = []
+    sleep_calls = {"count": 0}
+    poll_results = [([_build_wsj_item(105)], False)]
+
+    def fake_sleep(_seconds: int) -> None:
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 1:
+            raise KeyboardInterrupt
+
+    def fake_fetch_for_poll():
+        if poll_results:
+            return poll_results.pop(0)
+        return [], True
+
+    def callback(items: List[Dict[str, Any]]) -> None:
+        collected_ids.extend(item["id"] for item in items)
+
+    monkeypatch.setattr("crawl.wallstreetcn.time.sleep", fake_sleep)
+    monkeypatch.setattr(monitor, "_fetch_new_items_for_poll", fake_fetch_for_poll)
+
+    monitor.start(callback=callback)
+
+    assert monitor.last_id == 100
+    assert collected_ids == [105]
+
+
+def test_wallstreetcn_monitor_does_not_emit_duplicate_items_before_watermark_commit(
+    monkeypatch,
+):
+    class _BaselineCrawler:
+        def fetch_incremental(
+            self,
+            last_id: int | None = None,
+            channel: str = "global-channel",
+            limit: int = 20,
+            important_only: bool = False,
+            min_score: int = 1,
+        ) -> List[Dict[str, Any]]:
+            del channel, limit, important_only, min_score
+            if last_id is None:
+                return [_build_wsj_item(100)]
+            return []
+
+    crawler = _BaselineCrawler()
+    monitor = WallStreetCNMonitor(crawler=crawler, poll_interval=1)
+    collected_ids: List[int] = []
+    sleep_calls = {"count": 0}
+    poll_results = [
+        ([_build_wsj_item(105), _build_wsj_item(104)], False),
+        ([_build_wsj_item(105), _build_wsj_item(104), _build_wsj_item(103)], True),
+    ]
+
+    def fake_sleep(_seconds: int) -> None:
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] > 2:
+            raise KeyboardInterrupt
+
+    def fake_fetch_for_poll():
+        if poll_results:
+            return poll_results.pop(0)
+        return [], True
+
+    def callback(items: List[Dict[str, Any]]) -> None:
+        collected_ids.extend(item["id"] for item in items)
+
+    monkeypatch.setattr("crawl.wallstreetcn.time.sleep", fake_sleep)
+    monkeypatch.setattr(monitor, "_fetch_new_items_for_poll", fake_fetch_for_poll)
+
+    monitor.start(callback=callback)
+
+    assert monitor.last_id == 105
+    assert collected_ids == [105, 104, 103]
 
 
 def test_wallstreetcn_monitor_drains_all_new_items_from_single_poll(monkeypatch):

@@ -24,6 +24,7 @@ import json
 import time
 import argparse
 import threading
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Set, Dict, Any, List
@@ -171,6 +172,27 @@ class InvestingMonitor:
         """标记文章为已爬取"""
         self.seen_digests.add(content_digest)
 
+    def _build_stable_dedup_digest(self, item: Dict[str, Any]) -> str:
+        """
+        构建稳定去重 digest（列表态与正文态统一）
+
+        优先使用 article_id / URL 生成稳定键，缺失时回退 formatter 生成。
+        """
+        article_id = str(item.get("id") or item.get("article_id") or "").strip()
+        source_url = str(
+            item.get("url") or item.get("source_url") or item.get("link") or ""
+        ).strip()
+
+        if article_id and source_url:
+            dedup_key = f"{article_id}|{source_url}"
+            return hashlib.sha1(dedup_key.encode("utf-8")).hexdigest()
+        if article_id:
+            return hashlib.sha1(article_id.encode("utf-8")).hexdigest()
+        if source_url:
+            return hashlib.sha1(source_url.encode("utf-8")).hexdigest()
+
+        return self.formatter.format_to_standard(item)["content_digest"]
+
     def _save_article(self, article: Dict[str, Any], channel: str) -> bool:
         """
         保存文章到文件
@@ -280,7 +302,7 @@ class InvestingMonitor:
 
                         # 转换为标准格式
                         standard_data = self.formatter.format_to_standard(news_item)
-                        content_digest = standard_data["content_digest"]
+                        content_digest = self._build_stable_dedup_digest(standard_data)
 
                         # 去重检查
                         if self._is_duplicate(content_digest):
@@ -350,8 +372,7 @@ class InvestingMonitor:
             page_old_count = 0
 
             for news_item in result["data"]:
-                temp_standard = self.formatter.format_to_standard(news_item)
-                quick_digest = temp_standard["content_digest"]
+                quick_digest = self._build_stable_dedup_digest(news_item)
 
                 if self._is_duplicate(quick_digest):
                     page_old_count += 1
@@ -437,7 +458,7 @@ class InvestingMonitor:
                         news_item["author"] = content_result["author"]
 
                     standard_data = self.formatter.format_to_standard(news_item)
-                    content_digest = standard_data["content_digest"]
+                    content_digest = self._build_stable_dedup_digest(standard_data)
 
                     # 线程安全的去重检查和保存
                     with self.lock:

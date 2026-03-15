@@ -23,3 +23,6 @@
 - 自适应轮询要与错误退避语义分离：空轮询扩容（`30→60→120`）只用于“成功但无新增”，失败路径仍固定 backoff（如 `10s`）并重置 idle 计数，否则会出现“错误后长时间不重试”的误判。
 - Unified UI 增加告警展示时，优先复用现有面板而不是盲目新增布局块；固定终端尺寸下新增独立 panel 很容易触发信息裁切（尤其下载统计/详情区），更稳妥做法是把告警级别与摘要整合进 [monitor/unified_ui.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/unified_ui.py) 的下载统计区。
 - 告警分级要区分“当前错误状态”和“历史错误文本”：UI 里不能仅凭 `last_error` 非空就判定 `ERROR`，否则恢复后会长期误报；`last_error` 更适合作为详情补充，级别判断应以 `status` 和实时失败/退避计数为主。
+- [crawl/wallstreetcn.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/wallstreetcn.py#L190) 的增量轮询必须显式返回“抓取是否完整”的信号；分页失败或命中翻页上限时不能推进 `last_id`，否则会永久漏抓。
+- [crawl/investing_monitor.py](/home/yztrade/PycharmProjects/longzhong_tiqu/crawl/investing_monitor.py#L176) 的判重要在入口层统一稳定键（`article_id/url`）；列表态不应依赖 formatter 的全文摘要字段来决定是否抓正文。
+- [monitor/scheduler.py](/home/yztrade/PycharmProjects/longzhong_tiqu/monitor/scheduler.py#L397) 的共享 `request_gate` 应只包会话校验，不应包整轮 `incremental_crawl`；否则多关键词会退化为串行轮询。

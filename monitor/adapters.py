@@ -368,20 +368,25 @@ class WallStreetCNAdapter(MonitorAdapter):
                     first_run = False
 
                     started_at = datetime.now()
-                    new_items = monitor._fetch_new_items_for_poll()
+                    new_items, poll_complete = monitor._fetch_new_items_for_poll()
+                    callback_items = monitor.prepare_callback_items(
+                        new_items,
+                        poll_complete,
+                    )
 
-                    if new_items:
-                        callback(new_items)
-                        ids = [item["id"] for item in new_items if item.get("id")]
-                        if ids:
-                            monitor.last_id = max(ids)
+                    if callback_items:
+                        callback(callback_items)
+                        if poll_complete:
+                            ids = [item["id"] for item in new_items if item.get("id")]
+                            if ids:
+                                monitor.last_id = max(ids)
 
                     finished_at = datetime.now()
                     self._record_channel_poll_result(
                         channel=channel,
                         started_at=started_at,
                         finished_at=finished_at,
-                        new_count=len(new_items),
+                        new_count=len(callback_items),
                         next_run_at=finished_at + timedelta(seconds=self.interval),
                     )
 
