@@ -5,7 +5,10 @@
 """
 
 import hashlib
+import re
 from typing import Dict, Any, List
+
+HTML_RE = re.compile(r'<[^>]+>')
 
 
 class Jin10Formatter:
@@ -34,8 +37,8 @@ class Jin10Formatter:
         """
         article_id = str(item.get("id", ""))
         data = item.get("data", {})
-        content = (data.get("content") or "").strip()
-        title_en = (data.get("title") or "").strip()
+        content = HTML_RE.sub('', data.get("content") or "").strip()
+        title_en = HTML_RE.sub('', data.get("title") or "").strip()
         publish_time = item.get("time", "")
         channels = item.get("channel", [])
         important = item.get("important", 0)
