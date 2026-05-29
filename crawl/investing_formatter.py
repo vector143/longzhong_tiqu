@@ -116,6 +116,7 @@ class InvestingFormatter:
             "commodities": "大宗商品",
             "economic-indicators": "经济指标",
             "economy": "宏观经济",
+            "latest": "最新资讯",
         }
 
         return category_map.get(channel, "大宗商品")

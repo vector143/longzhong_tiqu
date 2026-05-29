@@ -115,7 +115,7 @@ def parse_args():
     parser.add_argument(
         "--inv-channels",
         nargs="+",
-        default=["commodities", "economic-indicators", "economy"],
+        default=["commodities", "economic-indicators", "economy", "latest"],
         help="Investing.com 频道列表",
     )
     parser.add_argument(

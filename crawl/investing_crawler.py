@@ -23,6 +23,7 @@ class InvestingCommodityNewsCrawler:
         "commodities": "https://www.investing.com/news/commodities-news",
         "economic-indicators": "https://www.investing.com/news/economic-indicators",
         "economy": "https://www.investing.com/news/economy",
+        "latest": "https://www.investing.com/news/latest-news",
     }
 
     def __init__(
