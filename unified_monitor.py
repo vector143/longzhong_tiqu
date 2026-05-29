@@ -18,14 +18,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from monitor.manager import MonitorManager
-from monitor.adapters import WallStreetCNAdapter, InvestingAdapter, LongZhongAdapter
+from monitor.adapters import WallStreetCNAdapter, InvestingAdapter, LongZhongAdapter, Jin10Adapter
 from monitor.unified_ui import UnifiedMonitorUI
 
 
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description="统一监控系统 - 集成隆众/华尔街见闻/Investing.com",
+        description="统一监控系统 - 集成隆众/华尔街见闻/Investing.com/金十数据",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -47,11 +47,17 @@ def parse_args():
   # 开启 Investing 自适应轮询（空轮询自动降频）
   python unified_monitor.py --inv-adaptive --inv-max-interval 180
 
+  # 自定义金十数据轮询间隔和频道
+  python unified_monitor.py --jin10-interval 30 --jin10-channels 1 2 5
+
   # 禁用某个监控源
   python unified_monitor.py --disable-lz --disable-wsj
 
+  # 只跑金十数据
+  python unified_monitor.py --disable-lz --disable-wsj --disable-inv
+
   # 自定义轮询间隔
-  python unified_monitor.py --lz-interval 60 --wsj-interval 30 --inv-interval 300
+  python unified_monitor.py --lz-interval 60 --wsj-interval 30 --inv-interval 300 --jin10-interval 45
         """,
     )
 
@@ -158,6 +164,26 @@ def parse_args():
         help="禁用 Investing.com 监控",
     )
 
+    # 金十数据配置
+    parser.add_argument(
+        "--jin10-interval",
+        type=int,
+        default=60,
+        help="金十数据轮询间隔（秒），默认 60",
+    )
+    parser.add_argument(
+        "--jin10-channels",
+        nargs="+",
+        type=int,
+        default=[1, 2, 3, 5],
+        help="金十数据频道（1=市场 2=期货 3=美港 4=A股 5=商品外汇），默认排除A股",
+    )
+    parser.add_argument(
+        "--disable-jin10",
+        action="store_true",
+        help="禁用金十数据监控",
+    )
+
     # UI 配置
     parser.add_argument(
         "--refresh-rate",
@@ -217,6 +243,15 @@ def main():
             max_interval=args.inv_max_interval,
         )
         manager.register(inv_adapter)
+        enabled_count += 1
+
+    if not args.disable_jin10:
+        print(f"✅ 金十数据: {len(args.jin10_channels)} 个频道")
+        jin10_adapter = Jin10Adapter(
+            interval=args.jin10_interval,
+            include_channels=tuple(args.jin10_channels),
+        )
+        manager.register(jin10_adapter)
         enabled_count += 1
 
     if enabled_count == 0:
