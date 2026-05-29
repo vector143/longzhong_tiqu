@@ -849,7 +849,6 @@ class Jin10Adapter(MonitorAdapter):
             if not self.wait_if_paused():
                 break
 
-            started_at = datetime.now()
             try:
                 new_items = crawler.fetch_latest()
 

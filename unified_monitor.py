@@ -35,7 +35,7 @@ def parse_args():
   # 自定义隆众关键词
   python unified_monitor.py --lz-keywords "原油,甲醇,PTA"
 
-  # 自定义华尔街见闻频道（默认8个：全球/外汇/大宗商品/债券/原油/黄金）
+  # 自定义华尔街见闻频道（默认6个：全球/大宗商品/原油/黄金）
   python unified_monitor.py --wsj-channels commodity-channel oil-channel
 
   # 自定义 Investing 代理
