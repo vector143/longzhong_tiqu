@@ -30,7 +30,7 @@ class Jin10Formatter:
             item: flash_newest.js 中的单条快讯
 
         Returns:
-            14字段标准 cleaned JSON
+            13字段标准 cleaned JSON
         """
         article_id = str(item.get("id", ""))
         data = item.get("data", {})

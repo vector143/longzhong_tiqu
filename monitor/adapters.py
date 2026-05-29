@@ -2,6 +2,7 @@
 具体监控适配器实现
 """
 
+import json
 import logging
 import sys
 import threading
@@ -17,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from monitor.adapter import MonitorAdapter, MonitorStatus
 from crawl.wallstreetcn import WallStreetCNLiveCrawler, WallStreetCNMonitor
 from crawl.investing_monitor import InvestingMonitor
+from crawl.jin10_crawler import Jin10Crawler
+from crawl.jin10_formatter import Jin10Formatter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WSJ_OUTPUT_DIR = PROJECT_ROOT / "output" / "report" / "cleaned"
@@ -825,15 +828,12 @@ class Jin10Adapter(MonitorAdapter):
         self._state.extra["output_dir"] = self.output_dir
         self._state.extra["total_fetched"] = 0
         self._state.extra["last_id"] = None
+        self._idle_rounds = 0
 
     def _run(self):
-        from crawl.jin10_crawler import Jin10Crawler
-        from crawl.jin10_formatter import Jin10Formatter
-
         crawler = Jin10Crawler(include_channels=self.include_channels, skip_vip=True)
         formatter = Jin10Formatter()
 
-        # 初始化基线
         try:
             crawler.init_baseline()
             self._state.extra["last_id"] = crawler.last_id
@@ -842,20 +842,24 @@ class Jin10Adapter(MonitorAdapter):
             self._state.last_error = f"金十初始化失败: {e}"
             return
 
-        # 确保输出目录存在
         output_path = Path(self.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
         while not self.should_stop():
+            if not self.wait_if_paused():
+                break
+
             started_at = datetime.now()
             try:
                 new_items = crawler.fetch_latest()
 
+                formatted_items = []
                 saved_count = 0
                 for item in new_items:
                     try:
                         standard_data = formatter.format_to_standard(item)
                         self._save_item(standard_data, output_path)
+                        formatted_items.append(standard_data)
                         saved_count += 1
                     except Exception as e:
                         logger.warning(f"金十保存单条失败: {e}")
@@ -869,36 +873,44 @@ class Jin10Adapter(MonitorAdapter):
                 self._state.last_error = None
 
                 if saved_count > 0:
+                    self._idle_rounds = 0
                     recent = [
-                        {"title": formatter.format_to_standard(it)["title"], "time": it["time"]}
-                        for it in new_items[:5]
+                        {"title": fd["title"], "time": fd["publish_time"]}
+                        for fd in formatted_items[:5]
                     ]
                     self._state.extra["last_items"] = recent
                     self._state.extra["recent_items"] = recent
+                else:
+                    self._idle_rounds += 1
 
-                next_run_at = finished_at + timedelta(seconds=self.interval)
-                self._state.extra["next_run_at"] = next_run_at
+                self._state.extra["next_run_at"] = (
+                    finished_at + timedelta(seconds=self._compute_wait())
+                )
 
             except Exception as e:
                 finished_at = datetime.now()
                 self._state.last_error = f"金十轮询失败: {e}"
                 self._state.items_count = 0
+                self._state.extra["next_run_at"] = (
+                    finished_at + timedelta(seconds=10)
+                )
 
-            if not self.wait_interval(self.interval):
+            if not self.wait_interval(self._compute_wait()):
                 break
 
-    @staticmethod
-    def _save_item(standard_data: dict, output_path) -> None:
-        """保存单条快讯为JSON文件"""
-        import json as json_mod
+    def _compute_wait(self) -> int:
+        if self._idle_rounds == 0:
+            return self.interval
+        return min(self.interval * (2 ** min(self._idle_rounds, 4)), 600)
 
+    @staticmethod
+    def _save_item(standard_data: dict, output_path: Path) -> None:
         article_id = standard_data.get("article_id", "unknown")
-        date = standard_data.get("date", "").replace("-", "")
-        if not date:
-            from datetime import datetime as dt
-            date = dt.now().strftime("%Y%m%d")
-        filename = f"JIN10_{date}_{article_id}.json"
+        date_str = standard_data.get("date", "").replace("-", "")
+        if not date_str:
+            date_str = datetime.now().strftime("%Y%m%d")
+        filename = f"JIN10_{date_str}_{article_id}.json"
         filepath = output_path / filename
 
         with open(filepath, "w", encoding="utf-8") as f:
-            json_mod.dump(standard_data, f, ensure_ascii=False, indent=2)
+            json.dump(standard_data, f, ensure_ascii=False, indent=2)
