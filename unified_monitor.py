@@ -35,7 +35,7 @@ def parse_args():
   # 自定义隆众关键词
   python unified_monitor.py --lz-keywords "原油,甲醇,PTA"
 
-  # 自定义华尔街见闻频道
+  # 自定义华尔街见闻频道（默认8个：全球/外汇/大宗商品/债券/原油/黄金）
   python unified_monitor.py --wsj-channels commodity-channel oil-channel
 
   # 自定义 Investing 代理
@@ -85,13 +85,16 @@ def parse_args():
         "--wsj-channels",
         nargs="+",
         default=[
+            "global-channel",
+            "forex-channel",
             "commodity-channel",
+            "bond-channel",
             "oil-channel",
             "gold-channel",
             "gold-forex-channel",
             "goldc-channel",
         ],
-        help="华尔街见闻频道列表",
+        help="华尔街见闻频道列表（默认排除股市相关频道）",
     )
     parser.add_argument(
         "--wsj-interval",
