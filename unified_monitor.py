@@ -86,9 +86,7 @@ def parse_args():
         nargs="+",
         default=[
             "global-channel",
-            "forex-channel",
             "commodity-channel",
-            "bond-channel",
             "oil-channel",
             "gold-channel",
             "gold-forex-channel",
